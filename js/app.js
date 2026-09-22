@@ -144,7 +144,11 @@
           text: line,
           title: item.title,
           py: '',
-          hint: i > 0 ? item.lines[i - 1] : item.title
+          // 第一句没有"上一句"可给。原来这里塞的是标题，
+          // 孩子看到标题并不知道该从哪儿写起 —— 直接说明是开头。
+          hint: i > 0 ? item.lines[i - 1] : '',
+          idx: i + 1,
+          total: item.lines.length
         });
       });
     });
@@ -422,6 +426,11 @@
     var unit = st.unit;
     var lesson = st.lesson || 'all';
 
+    // 先数清楚这个单元有没有题。没有就把按钮换成一句说明 ——
+    // 点下去才说"没有内容"、还顺带把页面弹回顶部，是很糟糕的体验。
+    var polyCount = itemsForPoly(unit).length;
+    var reciteCount = itemsForRecite(unit).length;
+
     var unitBtns = D.UNITS.map(function (u) {
       return '<button class="unit-btn' + (unit === u.id ? ' on' : '') +
         '" data-act="unit" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + '</button>';
@@ -492,8 +501,12 @@
       '<div class="card">' +
       '<h2 class="card-title">选择题与默写</h2>' +
       '<p class="card-note">这两种由程序自己判，不用等家长批改 —— 当场就知道对错，错了马上能订正。</p>' +
-      '<button class="btn btn-soft btn-block" data-act="start-poly">多音字选读音</button>' +
-      '<button class="btn btn-soft btn-block" data-act="start-recite">日积月累 / 古诗默写</button>' +
+      (polyCount
+        ? '<button class="btn btn-soft btn-block" data-act="start-poly">多音字选读音（' + polyCount + ' 题）</button>'
+        : '<p class="card-note">本单元还没有多音字数据。</p>') +
+      (reciteCount
+        ? '<button class="btn btn-soft btn-block" data-act="start-recite">日积月累 / 古诗默写（' + reciteCount + ' 句）</button>'
+        : '<p class="card-note">本单元没有要背的内容（日积月累 / 古诗），换一个单元试试。</p>') +
       '</div>' +
 
       '<div class="card card-quiet">' +
@@ -547,7 +560,13 @@
   }
 
   function viewPracticeRecite(it) {
+    // 光说"写下一句"太含糊：孩子不知道自己背到第几句、这一句接在哪后面。
+    // 把"第几句 / 共几句"和上一句原文都摆出来，他才知道该接什么。
+    var lead = it.idx > 1
+      ? '上一句是：「' + esc(it.hint) + '」'
+      : '这是开头第一句。';
     var body = '' +
+      '<div class="card-note">接着写第 ' + it.idx + ' 句（这一段共 ' + it.total + ' 句）</div>' +
       // class 复用 note-input：现成的文本输入框样式，不必再新增一套
       '<input id="typedInput" class="note-input" type="text" inputmode="text" ' +
       'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" ' +
@@ -556,8 +575,8 @@
       '<button class="btn btn-soft" data-act="give-up">想不起来</button>' +
       '<button class="btn btn-primary" data-act="submit-typed">写好了</button>' +
       '</div>';
-    return typedShell(it.title || '默写', '接着写下一句',
-      '<span class="py-hint">' + esc(it.hint) + '</span>',
+    return typedShell(it.title || '默写', '第 ' + it.idx + ' / ' + it.total + ' 句',
+      '<span class="py-hint">' + lead + '</span>',
       body, '不会就点「想不起来」，别硬猜 —— 猜错也会被记成还没掌握。');
   }
 
@@ -741,13 +760,24 @@
 
   function reviewStatsHtml() {
     var st = app.state;
-    var done = st.history.length;
+    var hist = st.history || [];
+    var done = hist.length;
     if (!done) return '';
-    var ok = st.history.filter(function (h) { return h.isCorrect; }).length;
+    var ok = hist.filter(function (h) { return h.isCorrect; }).length;
+
+    // 光给一个百分比不够用：孩子（和家长）真正想知道的是"我哪一句写错了"。
+    // 所以把最近做过的题也列出来，对错标在每一条后面。
+    // 手写题要等家长批改才进 history，所以这里不会混入"还没批"的题。
+    var recent = hist.slice(-12).reverse().map(function (r) {
+      return '<li><b>' + esc(r.text) + '</b>　' +
+        (r.isCorrect ? '写对了' : '写错了') + '</li>';
+    }).join('');
+
     return '<div class="card card-quiet">' +
-      '<h2 class="card-title">批改情况</h2>' +
-      '<p class="card-note">已批 ' + done + ' 条，写对 ' + ok + ' 条（' +
+      '<h2 class="card-title">做过的情况</h2>' +
+      '<p class="card-note">一共 ' + done + ' 条，写对 ' + ok + ' 条（' +
       Math.round(ok / done * 100) + '%）。</p>' +
+      '<ul class="tag-list">' + recent + '</ul>' +
       '</div>';
   }
 
@@ -950,6 +980,9 @@
   }
 
   /* ============================== 渲染与事件 ============================== */
+  // 记住上一次的"页面 / 第几题"，用来判断这次 render 要不要把页面拉回顶部
+  var lastView = null, lastCursor = -1;
+
   function render() {
     var root = el('app');
     var html = app.view === 'practice' ? viewPractice()
@@ -977,7 +1010,16 @@
       var pCols = pIsZ ? (p0.item.perRow || 4) : 0;
       setupCanvas(el('reviewCanvas'), pN, p0.strokes, false, pGrid, pCols);
     }
-    window.scrollTo(0, 0);
+    // 只在"换了页面"或"做到下一题"时才回到顶部。
+    //
+    // 原来每次 render 都无条件 scrollTo(0,0)，于是选单元、选课时、切换
+    // 看拼音/看词语，页面都会猛地弹回顶部 —— 手指停在半空，下一指就点错了。
+    // 这类原地刷新不该动滚动位置。
+    var needTop = (app.view !== lastView) ||
+      (app.view === 'practice' && app.cursor !== lastCursor);
+    lastView = app.view;
+    lastCursor = app.cursor;
+    if (needTop) window.scrollTo(0, 0);
   }
 
   function onClick(e) {
