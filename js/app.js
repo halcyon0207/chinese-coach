@@ -42,6 +42,9 @@
     note: '',
     // 默写/打字题的输入内容。手写题走的是 strokes（笔迹），两套互不干扰。
     typed: '',
+    // 这一轮自动判分题的成绩。手写题不统计 —— 它们要等家长批才算数。
+    roundOk: 0,
+    roundTotal: 0,
     message: ''
   };
 
@@ -823,6 +826,8 @@
     app.session = shuffle(rng, all);
     app.cursor = 0;
     app.typed = '';
+    app.roundOk = 0;
+    app.roundTotal = 0;
     app.message = '';
     app.view = 'practice';
     render();
@@ -838,6 +843,8 @@
     app.session = all;
     app.cursor = 0;
     app.typed = '';
+    app.roundOk = 0;
+    app.roundTotal = 0;
     app.message = '';
     app.view = 'practice';
     render();
@@ -880,14 +887,18 @@
 
   function finishTyped(it, ok, answerText) {
     recordResult(it, ok, ok ? '' : answerText);
+    app.roundTotal = (app.roundTotal || 0) + 1;
+    if (ok) app.roundOk = (app.roundOk || 0) + 1;
     app.typed = '';
     app.cursor++;
     // 错了当场就把正确的摆出来：错的内容拖几天再纠正，
     // 他这几天里多半已经把错的记牢了，改起来比当时贵得多。
     app.message = ok ? '✓ 对了。' : ('✗ ' + answerText);
     if (app.cursor >= app.session.length) {
-      app.view = 'home';
-      app.session = null;
+      // 留一个收尾页。原来这里直接切回首页，结果最后一句对没对、本轮
+      // 做了几题对了几题，全都一闪而过 —— 尤其是最后一句错了，
+      // 正确答案刚显示出来页面就跳走了，等于没订正。
+      app.view = 'done';
     }
     S.save(app.state);
     render();
@@ -980,15 +991,36 @@
   }
 
   /* ============================== 渲染与事件 ============================== */
+  // 一轮做完的收尾页。
+  // 原来做完最后一句直接切回首页：这句对没对、本轮做了几题，全都一闪而过。
+  // 尤其最后一句错了的时候 —— 正确答案刚显示出来页面就跳走了，等于没订正。
+  function viewDone() {
+    var total = app.roundTotal || 0;
+    var ok = app.roundOk || 0;
+    return '' +
+      '<div class="card card-cta">' +
+      '<div class="cta-line">共 ' + total + ' 题，对了 ' + ok + ' 题</div>' +
+      '<div class="cta-sub">' +
+      (total === ok ? '全对，不错。' : '错的那些今天还会再出现一次，趁热再看一眼。') +
+      '</div>' +
+      '</div>' +
+      '<div class="card">' +
+      '<h2 class="card-title">最后一题</h2>' +
+      '<p class="card-note">' + esc(app.message || '') + '</p>' +
+      '<button class="btn btn-primary btn-block" data-act="home">回首页</button>' +
+      '</div>';
+  }
+
   // 记住上一次的"页面 / 第几题"，用来判断这次 render 要不要把页面拉回顶部
   var lastView = null, lastCursor = -1;
 
   function render() {
     var root = el('app');
     var html = app.view === 'practice' ? viewPractice()
-      : app.view === 'parent' ? viewParent()
-        : app.view === 'ref' ? viewRef()
-          : viewHome();
+      : app.view === 'done' ? viewDone()
+        : app.view === 'parent' ? viewParent()
+          : app.view === 'ref' ? viewRef()
+            : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' + html + '</div>';
 
     // 打字/选择题没有画布，setupCanvas 要跳过 —— 否则会拿到 null 报错
