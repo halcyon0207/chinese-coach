@@ -516,6 +516,7 @@
       '<h2 class="card-title">家长</h2>' +
       '<button class="btn btn-ghost btn-block" data-act="parent">家长批改' +
       (pending ? '（' + pending + ' 条待批）' : '') + '</button>' +
+      '<button class="btn btn-ghost btn-block" data-act="report">练习报告（题型 · 单元 · 错题）</button>' +
       '</div>' +
 
       '<p class="footnote">数据只保存在这台设备上，不会上传。</p>';
@@ -784,6 +785,80 @@
       '</div>';
   }
 
+  /* ============================== 视图：练习报告 ============================== */
+  // 题型名称。history 里存的是 key（形如 "p:薄·薄雾"），从这里反查题型。
+  var KIND_NAME = {
+    w: '看拼音写词语', c: '看拼音写生字', z: '组词', p: '多音字选读音', r: '默写'
+  };
+
+  function reportBodyHtml() {
+    var hist = app.state.history || [];
+    if (!hist.length) {
+      return '<div class="card"><h2 class="card-title">练习报告</h2>' +
+        '<p class="card-note">还没有做题记录。练过一次之后，这里会按题型和单元分开统计。</p></div>';
+    }
+    var ok = hist.filter(function (h) { return h.isCorrect; }).length;
+
+    function group(nameOf) {
+      var g = {};
+      hist.forEach(function (h) {
+        var n = nameOf(h);
+        var b = g[n] = g[n] || { total: 0, correct: 0 };
+        b.total++;
+        if (h.isCorrect) b.correct++;
+      });
+      return '<ul class="tag-list">' + Object.keys(g)
+        .sort(function (a, b) { return g[b].total - g[a].total; })
+        .map(function (n) {
+          var b = g[n];
+          return '<li><b>' + esc(n) + '</b>　' + b.total + ' 题，对 ' + b.correct +
+            ' 题（' + Math.round(b.correct / b.total * 100) + '%）</li>';
+        }).join('') + '</ul>';
+    }
+
+    var byKind = group(function (h) {
+      return KIND_NAME[String(h.key || '').split(':')[0]] || '其他';
+    });
+    var byUnit = group(function (h) {
+      var info = D.byId(h.unit || '');
+      return info ? info.name : (h.unit || '未记录');
+    });
+
+    var wrong = hist.filter(function (h) { return !h.isCorrect; }).slice(-15).reverse();
+    var wrongList = wrong.length
+      ? '<ul class="tag-list">' + wrong.map(function (h) {
+          return '<li><b>' + esc(h.text) + '</b>' +
+            (h.note ? '　' + esc(h.note) : '') + '</li>';
+        }).join('') + '</ul>'
+      : '<p class="card-note">还没有错题。</p>';
+
+    var due = 0, now = Date.now(), st = app.state.stats || {};
+    Object.keys(st).forEach(function (k) {
+      if (st[k] && st[k].dueAt && st[k].dueAt <= now) due++;
+    });
+
+    return '' +
+      '<div class="card">' +
+      '<h2 class="card-title">总览</h2>' +
+      '<p class="card-note">一共 ' + hist.length + ' 题，写对 ' + ok + ' 题（' +
+      Math.round(ok / hist.length * 100) + '%）。</p>' +
+      '<p class="card-note">今天到期该复习：' + due + ' 个；' +
+      '还有 ' + app.state.pending.length + ' 条等家长批改。</p>' +
+      '</div>' +
+      '<div class="card"><h2 class="card-title">按题型</h2>' + byKind + '</div>' +
+      '<div class="card"><h2 class="card-title">按单元</h2>' + byUnit + '</div>' +
+      '<div class="card"><h2 class="card-title">最近的错题（最多 15 条）</h2>' +
+      '<p class="card-note">后面那句是家长批改时写的批注。</p>' + wrongList + '</div>';
+  }
+
+  function viewReport() {
+    return '' +
+      '<div class="topbar">' +
+      '<button class="btn-icon" data-act="home">←</button>' +
+      '<span class="topbar-title">练习报告</span><span class="topbar-right"></span></div>' +
+      reportBodyHtml();
+  }
+
   /* ============================== 动作 ============================== */
   function startSession() {
     app.session = buildSession(app.state.unit, app.state.lesson);
@@ -965,7 +1040,9 @@
 
     app.state.history.push({
       ts: Date.now(), key: k, text: item.text, py: item.py || '',
-      isCorrect: !!isCorrect, note: note || ''
+      isCorrect: !!isCorrect, note: note || '',
+      // 记下单元：报告要按单元分开统计，光有 key 反查不出来是哪一课的
+      unit: item.unit || app.state.unit || ''
     });
     if (app.state.history.length > 2000) {
       app.state.history = app.state.history.slice(-2000);
@@ -1018,9 +1095,10 @@
     var root = el('app');
     var html = app.view === 'practice' ? viewPractice()
       : app.view === 'done' ? viewDone()
-        : app.view === 'parent' ? viewParent()
-          : app.view === 'ref' ? viewRef()
-            : viewHome();
+        : app.view === 'report' ? viewReport()
+          : app.view === 'parent' ? viewParent()
+            : app.view === 'ref' ? viewRef()
+              : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' + html + '</div>';
 
     // 打字/选择题没有画布，setupCanvas 要跳过 —— 否则会拿到 null 报错
@@ -1099,6 +1177,7 @@
     if (act === 'clear') { app.strokes = []; app.message = ''; return render(); }
     if (act === 'submit') return submitWriting();
     if (act === 'ref') { app.view = 'ref'; return render(); }
+    if (act === 'report') { app.view = 'report'; return render(); }
     if (act === 'parent') {
       app.view = 'parent';
       app.passInput = '';
