@@ -20,6 +20,7 @@
   'use strict';
 
   var D = window.ChineseData;
+  var R = window.ReciteData;
   var S = window.Store;
 
   // 间隔复习阶梯：答对就往后推一档，答错退回第一天
@@ -39,6 +40,8 @@
     parentUnlocked: false,
     passInput: '',
     note: '',
+    // 默写/打字题的输入内容。手写题走的是 strokes（笔迹），两套互不干扰。
+    typed: '',
     message: ''
   };
 
@@ -99,6 +102,54 @@
   }
 
   function itemsForUnit(unitId) { return itemsForLesson(unitId, 'all'); }
+
+  /* ---------- 多音字选择题 ---------- */
+  // 素材是现成的：data.js 里每单元都有 polyphone（字 + 每个读音 + 课文里的例子）。
+  // 出题方式：拿一个例子问"这个字在这里读什么"，选项就是这个字的全部读音。
+  // 不用另外整理资料 —— 当初把它们录进来就是为了这一天。
+  function itemsForPoly(unitId) {
+    var u = D.byId(unitId);
+    if (!u) return [];
+    var out = [];
+    (u.polyphone || []).forEach(function (p) {
+      (p.readings || []).forEach(function (rd) {
+        var eg = String(rd.eg || '').split('、')[0].trim();
+        if (!eg) return;
+        out.push({
+          kind: 'p',
+          // text 要能唯一标识这道题：统计和复习排队都按 kind + text 记
+          text: p.char + '·' + eg,
+          char: p.char,
+          eg: eg,
+          py: rd.py,
+          options: (p.readings || []).map(function (x) { return x.py; })
+        });
+      });
+    });
+    return out;
+  }
+
+  /* ---------- 默写（日积月累 / 古诗）---------- */
+  // 每一句一道题：给上一句（第一句给标题）当提示，让孩子把这一句打出来。
+  //
+  // 用打字而不是手写，是刻意的：默写考的是"记不记得住内容"，
+  // 不是"字写得对不对"。"点、出头、包围结构"那些是手写题在管的事，
+  // 让默写字字都去手写，孩子一晚上就写不动了，反而练不到"背"。
+  function itemsForRecite(unitId) {
+    var out = [];
+    (R ? R.forUnit(unitId) : []).forEach(function (item) {
+      (item.lines || []).forEach(function (line, i) {
+        out.push({
+          kind: 'r',
+          text: line,
+          title: item.title,
+          py: '',
+          hint: i > 0 ? item.lines[i - 1] : item.title
+        });
+      });
+    });
+    return out;
+  }
 
   function mulberry32(seed) {
     var s = seed >>> 0;
@@ -438,6 +489,13 @@
       '<button class="btn btn-ghost btn-block" data-act="ref">二类字 / 多音字 / 易错字</button>' +
       '</div>' +
 
+      '<div class="card">' +
+      '<h2 class="card-title">选择题与默写</h2>' +
+      '<p class="card-note">这两种由程序自己判，不用等家长批改 —— 当场就知道对错，错了马上能订正。</p>' +
+      '<button class="btn btn-soft btn-block" data-act="start-poly">多音字选读音</button>' +
+      '<button class="btn btn-soft btn-block" data-act="start-recite">日积月累 / 古诗默写</button>' +
+      '</div>' +
+
       '<div class="card card-quiet">' +
       '<h2 class="card-title">家长</h2>' +
       '<button class="btn btn-ghost btn-block" data-act="parent">家长批改' +
@@ -448,9 +506,66 @@
   }
 
   /* ============================== 视图：练习 ============================== */
+
+  // 多音字 / 默写不走田字格：它们由程序判分，也不进"等家长批改"的队列
+  function isTypedKind(it) { return !!it && (it.kind === 'p' || it.kind === 'r'); }
+
+  function typedProgress() {
+    var total = app.session.length;
+    return total > 20
+      ? '<span class="bar"><i style="width:' + Math.round(app.cursor / total * 100) + '%"></i></span>'
+      : app.session.map(function (_, i) {
+          var cls = i < app.cursor ? 'dot done' : (i === app.cursor ? 'dot now' : 'dot');
+          return '<i class="' + cls + '"></i>';
+        }).join('');
+  }
+
+  function typedShell(tag, stemLabel, stemBody, body, note) {
+    return '' +
+      '<div class="topbar">' +
+      '<button class="btn-icon" data-act="quit" title="退出">✕</button>' +
+      '<div class="dots">' + typedProgress() + '</div>' +
+      '<span class="topbar-right">' + (app.cursor + 1) + '/' + app.session.length + '</span>' +
+      '</div>' +
+      '<div class="card card-q">' +
+      '<div class="lesson-tag">' + esc(tag) + '</div>' +
+      '<div class="stem"><span class="stem-label">' + esc(stemLabel) + '</span>' + stemBody + '</div>' +
+      body +
+      (note ? '<p class="card-note">' + esc(note) + '</p>' : '') +
+      (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
+      '</div>';
+  }
+
+  function viewPracticePoly(it) {
+    var body = '<div class="opt-col">' + it.options.map(function (py) {
+      return '<button class="btn btn-soft btn-block" data-act="choose" data-v="' + esc(py) + '">' +
+        esc(py) + '</button>';
+    }).join('') + '</div>';
+    return typedShell('多音字', '选读音',
+      '「<b>' + esc(it.char) + '</b>」在「' + esc(it.eg) + '」里读什么？',
+      body, '选对了往后推一档复习；选错了今天还会再出现一次。');
+  }
+
+  function viewPracticeRecite(it) {
+    var body = '' +
+      // class 复用 note-input：现成的文本输入框样式，不必再新增一套
+      '<input id="typedInput" class="note-input" type="text" inputmode="text" ' +
+      'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" ' +
+      'placeholder="把这一句打出来" value="' + esc(app.typed || '') + '">' +
+      '<div class="action-row">' +
+      '<button class="btn btn-soft" data-act="give-up">想不起来</button>' +
+      '<button class="btn btn-primary" data-act="submit-typed">写好了</button>' +
+      '</div>';
+    return typedShell(it.title || '默写', '接着写下一句',
+      '<span class="py-hint">' + esc(it.hint) + '</span>',
+      body, '不会就点「想不起来」，别硬猜 —— 猜错也会被记成还没掌握。');
+  }
+
   function viewPractice() {
     var it = app.session[app.cursor];
     if (!it) return '<div class="card">没有题目。</div>';
+    if (it.kind === 'p') return viewPracticePoly(it);
+    if (it.kind === 'r') return viewPracticeRecite(it);
     var isZ = it.kind === 'z';
     var n = isZ ? it.cells : it.text.length;
     var total = app.session.length;
@@ -662,6 +777,92 @@
     render();
   }
 
+  // 多音字 / 默写由程序自己判，不进"等家长批改"的队列。
+  //
+  // 这不是要取代家长批改 —— 手写题（看拼音写词语）仍然是手写 + 家长看，
+  // 因为"点、出头、全包围半包围"只有真的落笔才看得出来，打字完全绕过去了。
+  // 分流的理由是另一条：这两类题**有唯一正确答案**，硬让它们卡在队列里等家长，
+  // 孩子当天就看不到对错，错了也没法马上订正。
+  function startPoly() {
+    var all = itemsForPoly(app.state.unit);
+    if (!all.length) {
+      app.message = '本单元还没有多音字数据。';
+      return render();
+    }
+    var rng = mulberry32((Date.now() ^ 0x5bf03635) >>> 0);
+    app.session = shuffle(rng, all);
+    app.cursor = 0;
+    app.typed = '';
+    app.message = '';
+    app.view = 'practice';
+    render();
+  }
+
+  function startRecite() {
+    var all = itemsForRecite(app.state.unit);
+    if (!all.length) {
+      app.message = '这个单元还没有要背的内容，换个单元试试。';
+      return render();
+    }
+    // 不打乱：背诵是有顺序的，第二句本来就该接在第一句后面
+    app.session = all;
+    app.cursor = 0;
+    app.typed = '';
+    app.message = '';
+    app.view = 'practice';
+    render();
+  }
+
+  // 默写判分要容错。孩子用的是手机输入法，多打一个空格、少打一个标点
+  // 不该算错 —— 去掉空白和标点只比"字对不对"。
+  function normRecite(s) {
+    return String(s == null ? '' : s)
+      .replace(/\s+/g, '')
+      .replace(/[，。、？！；：""''（）「」《》·—…．,.?!;:'"()]/g, '');
+  }
+
+  function submitTyped(isGiveUp) {
+    var it = app.session[app.cursor];
+    if (!it) return;
+
+    if (it.kind === 'p') {
+      var picked = String(app.typed || '').trim();
+      if (!picked) {
+        app.message = '先选一个读音。';
+        return render();
+      }
+      finishTyped(it, picked === it.py,
+        '「' + it.eg + '」里的「' + it.char + '」读 ' + it.py);
+      return;
+    }
+
+    if (isGiveUp) {
+      finishTyped(it, false, '这一句是：' + it.text);
+      return;
+    }
+    var typed = String(app.typed || '').trim();
+    if (!typed) {
+      app.message = '先把这一句打出来；实在想不起来就点「想不起来」。';
+      return render();
+    }
+    finishTyped(it, normRecite(typed) === normRecite(it.text), '这一句是：' + it.text);
+  }
+
+  function finishTyped(it, ok, answerText) {
+    recordResult(it, ok, ok ? '' : answerText);
+    app.typed = '';
+    app.cursor++;
+    // 错了当场就把正确的摆出来：错的内容拖几天再纠正，
+    // 他这几天里多半已经把错的记牢了，改起来比当时贵得多。
+    app.message = ok ? '✓ 对了。' : ('✗ ' + answerText);
+    if (app.cursor >= app.session.length) {
+      app.view = 'home';
+      app.session = null;
+    }
+    S.save(app.state);
+    render();
+  }
+
   function submitWriting() {
     if (!app.strokes.length) {
       app.message = '先在田字格里写一下。';
@@ -695,10 +896,13 @@
     render();
   }
 
-  function gradeCurrent(isCorrect) {
-    var p = app.state.pending[0];
-    if (!p) return;
-    var k = keyOf(p.item);
+  // 一次作答落下去了：更新掌握情况、排下次复习、记一条历史。
+  //
+  // 家长批改（手写题）和程序自动判分（多音字 / 默写）走的是同一套，
+  // 复习节奏才不会出现两套标准 —— 否则"错一次"在两种题型里含义不同，
+  // 到期排队就乱了。
+  function recordResult(item, isCorrect, note) {
+    var k = keyOf(item);
     var r = app.state.stats[k] || { attempts: 0, corrects: 0, wrongs: 0, level: 0 };
 
     r.attempts++;
@@ -715,31 +919,29 @@
       r.dueAt = Date.now();
     }
     r.lastAt = Date.now();
-    if (app.note) r.note = app.note;
+    if (note) r.note = note;
     app.state.stats[k] = r;
 
-    // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
-    // 家长那句批注也就失去了上下文。
-    app.state.feedback.push({
-      ts: Date.now(),
-      key: k,
-      text: p.item.text,
-      py: p.item.py,
-      isCorrect: !!isCorrect,
-      note: app.note || ''
-    });
-
     app.state.history.push({
-      ts: Date.now(),
-      key: k,
-      text: p.item.text,
-      py: p.item.py,
-      isCorrect: !!isCorrect,
-      note: app.note || ''
+      ts: Date.now(), key: k, text: item.text, py: item.py || '',
+      isCorrect: !!isCorrect, note: note || ''
     });
     if (app.state.history.length > 2000) {
       app.state.history = app.state.history.slice(-2000);
     }
+  }
+
+  function gradeCurrent(isCorrect) {
+    var p = app.state.pending[0];
+    if (!p) return;
+    recordResult(p.item, isCorrect, app.note);
+
+    // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
+    // 家长那句批注也就失去了上下文。
+    app.state.feedback.push({
+      ts: Date.now(), key: keyOf(p.item), text: p.item.text, py: p.item.py,
+      isCorrect: !!isCorrect, note: app.note || ''
+    });
 
     app.state.pending.shift();
     app.note = '';
@@ -756,7 +958,8 @@
           : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' + html + '</div>';
 
-    if (app.view === 'practice' && app.session) {
+    // 打字/选择题没有画布，setupCanvas 要跳过 —— 否则会拿到 null 报错
+    if (app.view === 'practice' && app.session && !isTypedKind(app.session[app.cursor])) {
       var it = app.session[app.cursor];
       var isZ = it && it.kind === 'z';
       // 组词写汉字 → 田字格；看词语写拼音 → 拼音格；看拼音写词语 → 田字格
@@ -804,6 +1007,15 @@
     if (act === 'mode') { app.state.mode = t.getAttribute('data-m') || 'py2word'; S.save(app.state); return render(); }
     if (act === 'start') return startSession();
     if (act === 'start-zuci') return startZuci();
+    if (act === 'start-poly') return startPoly();
+    if (act === 'start-recite') return startRecite();
+    // 选了读音就直接判：少一次"确认"的点击，孩子不容易走神
+    if (act === 'choose') {
+      app.typed = t.getAttribute('data-v') || '';
+      return submitTyped(false);
+    }
+    if (act === 'submit-typed') return submitTyped(false);
+    if (act === 'give-up') return submitTyped(true);
     if (act === 'home') { app.view = 'home'; app.session = null; return render(); }
     if (act === 'quit') {
       app.view = 'home';
@@ -847,6 +1059,8 @@
     if (!t) return;
     if (t.id === 'passInput') app.passInput = t.value;
     if (t.id === 'noteInput') app.note = t.value;
+    // 只记下来，不 render —— render 会整块换掉 innerHTML，输入框会失焦
+    if (t.id === 'typedInput') app.typed = t.value;
   }
 
   function init() {
