@@ -36,7 +36,6 @@
     session: null,
     cursor: 0,
     strokes: [],
-    drawing: false,
     parentUnlocked: false,
     passInput: '',
     note: '',
@@ -45,10 +44,21 @@
     // 这一轮自动判分题的成绩。手写题不统计 —— 它们要等家长批才算数。
     roundOk: 0,
     roundTotal: 0,
-    message: ''
+    message: '',
+    // 存不进去时给家长看的一句话，见 saveState()
+    storageWarn: ''
   };
 
   function el(id) { return document.getElementById(id); }
+
+  // 保存必须看结果。隐私模式、空间满、被沙箱拦住时 setItem 会抛，
+  // 只 console.warn 的表现就是"写了一晚上，下次打开全没了"，家长查都查不出来。
+  function saveState() {
+    if (S.save(app.state)) { app.storageWarn = ''; return true; }
+    app.storageWarn = '这台设备现在存不下练习记录（可能是无痕模式或空间已满）。' +
+      '今天还能继续练，但关掉页面就不会保存，先告诉家长。';
+    return false;
+  }
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -72,10 +82,10 @@
     u.lessons.forEach(function (ln) {
       if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
       ln.words.forEach(function (w) {
-        out.push({ kind: 'w', text: w.w, py: w.p.join(' '), no: ln.no, title: ln.title });
+        out.push({ kind: 'w', text: w.w, py: w.p.join(' '), no: ln.no, unit: unitId, title: ln.title });
       });
       ln.chars.forEach(function (c) {
-        out.push({ kind: 'c', text: c.c, py: c.p, no: ln.no, title: ln.title });
+        out.push({ kind: 'c', text: c.c, py: c.p, no: ln.no, unit: unitId, title: ln.title });
       });
     });
     return out;
@@ -97,7 +107,7 @@
         out.push({
           kind: 'z', text: s.c, py: s.p, zuci: s.zuci,
           words: ZUCI_WORDS, perRow: ZUCI_PER_ROW, cells: ZUCI_WORDS * ZUCI_PER_ROW,
-          no: ln.no, title: ln.title
+          no: ln.no, unit: unitId, title: ln.title
         });
       });
     });
@@ -125,6 +135,7 @@
           char: p.char,
           eg: eg,
           py: rd.py,
+          unit: unitId,
           options: (p.readings || []).map(function (x) { return x.py; })
         });
       });
@@ -180,12 +191,12 @@
   // 到期的先练（这是间隔复习的意义），再补没学过的，最后才是其余的。
   // 不再限制每轮题数：练哪一课，就把那一课（或那个单元）的字词全部排上，
   // 不再只出 10 个 —— 免得一课的常用词被随机漏掉。
-  function buildSession(unitId, lesson) {
-    var all = itemsForLesson(unitId, lesson);
-    var rng = mulberry32((Date.now() ^ (all.length * 2654435761)) >>> 0);
+  //
+  // 这个顺序四种题型都得守。以前只有"看拼音写词语"排队，
+  // 组词和多音字是整批打乱 —— 到期的字照样排不到前面，复习等于没做。
+  function orderByDue(rng, all) {
     var st = app.state.stats || {};
     var now = Date.now();
-
     var due = [], fresh = [], rest = [];
     all.forEach(function (it) {
       var r = st[keyOf(it)];
@@ -193,14 +204,29 @@
       else if (r.dueAt && r.dueAt <= now) due.push(it);
       else rest.push(it);
     });
-
     return shuffle(rng, due)
       .concat(shuffle(rng, fresh), shuffle(rng, rest));
   }
 
+  function buildSession(unitId, lesson) {
+    var rng = mulberry32((Date.now() ^ ((unitId || '').length * 2654435761)) >>> 0);
+    return orderByDue(rng, itemsForLesson(unitId, lesson));
+  }
+
+  // 到期时间按"日历天"算，不按 24 小时整点。
+  // 晚上 9 点练的字，隔 1 天 = 明天 0 点起就到期；按 now + 24h 的话，
+  // 第二天晚上 8 点开软件时它还没到期，于是被整个跳过，实际隔了两天。
+  function dayAfter(n) {
+    var d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() + n * DAY;
+  }
+
+  // level 是"连对了几次"：连对 1 次隔 1 天，连对 2 次隔 2 天……
+  // 以前这里直接拿 level 当阶梯下标，第一次连对就跳到 2 天，1 天那一档永远用不上。
   function dueAtFor(level) {
-    var d = REVIEW_STEPS[Math.min(level, REVIEW_STEPS.length - 1)];
-    return Date.now() + d * DAY;
+    var i = Math.max(0, Math.min(level - 1, REVIEW_STEPS.length - 1));
+    return dayAfter(REVIEW_STEPS[i]);
   }
 
   /* ============================== 田字格画笔 ============================== */
@@ -286,18 +312,38 @@
 
   function posOf(cv, e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    // 取整：笔迹是一笔一笔存进 localStorage 的，小数点能省掉三分之一的体积
+    return {
+      x: Math.round(e.clientX - r.left),
+      y: Math.round(e.clientY - r.top)
+    };
   }
 
   // 每次渲染后都要重来一遍：画布是新的，尺寸也可能变了
   // gridType: 'tian' 田字格（写汉字）；'pinyin' 四线三格（写拼音）
   // forceCols: 每行固定几格（组词用，0/省略则自动排）
-  function setupCanvas(cv, n, strokes, editable, gridType, forceCols) {
+  //
+  // 转屏之后格子会变多变少，所以尺寸和格位放在 cv._ccGeo 这个可变的盒子里，
+  // 事件只绑一次（cv._ccBound）并随时从盒子里读最新的格位 ——
+  // 要是 resize 时再绑一遍，一次落笔就会被当成两笔，家长看到的全是重影。
+  var lastCanvas = null;
+
+  function setupCanvas(cv, n, strokes, editable, gridType, forceCols, retry) {
     if (!cv || typeof cv.getContext !== 'function') return;
     var host = cv.parentNode;
     if (!host) return;
     var W = host.clientWidth;
-    if (!W) return;
+    if (!W) {
+      // 布局还没定（刚插入 DOM）。这时候放手，画笔整个是死的：
+      // 孩子点了没反应，也不知道为什么 —— 等一帧再量一次（只再试一次，
+      // 容器一直是 0 宽的说明这一屏根本没有画布，别把 rAF 转成死循环）。
+      if (!retry && typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(function () {
+          setupCanvas(cv, n, strokes, editable, gridType, forceCols, true);
+        });
+      }
+      return;
+    }
     // 高度由格子算出来：折行之后要跟着变高，不然下面的格子会被切掉
     var L = cellLayout(n, W, gridType || 'tian', forceCols);
     var H = L.pad * 2 + L.rows * L.h + (L.rows - 1) * L.gap;
@@ -311,83 +357,116 @@
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    var list = strokes || app.strokes;
+    var geo = cv._ccGeo;
+    if (!geo) geo = cv._ccGeo = {};
+    geo.n = n;
+    geo.L = L;
+    geo.W = W;
+    geo.H = H;
+    geo.ctx = ctx;
+    geo.grid = gridType || 'tian';
+    geo.cols = forceCols;
+    geo.list = strokes || app.strokes;
+    lastCanvas = { cv: cv, n: n, strokes: strokes, editable: editable, gridType: gridType, forceCols: forceCols };
 
     function redraw() {
       ctx.clearRect(0, 0, W, H);
-      drawCells(ctx, n, W, gridType || 'tian', forceCols);
-      drawStrokes(ctx, list);
+      drawCells(ctx, n, W, geo.grid, forceCols);
+      drawStrokes(ctx, geo.list);
     }
+    geo.redraw = redraw;
     redraw();
 
     if (!editable) return;
 
     // 点哪个格子，就只清那个格子的笔迹 —— 可以单独重写某一个字
     function cellAt(pos) {
-      for (var i = 0; i < n; i++) {
-        var c = i % L.cols, r = Math.floor(i / L.cols);
-        var x = L.pad + c * (L.w + L.gap);
-        var y = L.pad + r * (L.h + L.gap);
-        if (pos.x >= x && pos.x <= x + L.w && pos.y >= y && pos.y <= y + L.h) return i;
+      var lay = geo.L;
+      for (var i = 0; i < geo.n; i++) {
+        var c = i % lay.cols, r = Math.floor(i / lay.cols);
+        var x = lay.pad + c * (lay.w + lay.gap);
+        var y = lay.pad + r * (lay.h + lay.gap);
+        if (pos.x >= x && pos.x <= x + lay.w && pos.y >= y && pos.y <= y + lay.h) return i;
       }
       return -1;
     }
     function clearCell(idx) {
+      var list = geo.list;
       for (var i = list.length - 1; i >= 0; i--) {
         if (list[i] && list[i].cell === idx) list.splice(i, 1);
       }
     }
 
-    var downPos = null, moved = false, holdTimer = null;
+    // 每根手指各记各的一笔。以前全页共用一个"正在画"开关和一条折线，
+    // 两根手指同时写（手掌蹭到屏、换手时没抬起来）会把两笔连成一条线，
+    // 家长看到的就是一个从来没写过的怪符号。
+    var live = {};
 
-    function stopHold() {
-      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (cv._ccBound) return;   // 事件已经绑好了，上面的 geo 一换就接着画
+    cv._ccBound = true;
+
+    function stopHold(s) {
+      if (s && s.holdTimer) { clearTimeout(s.holdTimer); s.holdTimer = null; }
+    }
+    function dropStroke(s) {
+      var at = geo.list.indexOf(s);
+      if (at >= 0) geo.list.splice(at, 1);
     }
 
     cv.addEventListener('pointerdown', function (e) {
       if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) {} }
-      app.drawing = true;
-      downPos = posOf(cv, e);
-      moved = false;
-      list.push({ cell: cellAt(downPos), pts: [downPos] });
+      var p = posOf(cv, e);
+      var s = { cell: cellAt(p), pts: [p], downPos: p, moved: false, holdTimer: null };
+      geo.list.push(s);
+      live[e.pointerId] = s;
       // 长按（按住不动约 0.55 秒）= 清空该格，单独重写这一个字。
       // 不能再用"轻点"：写拼音时 i、j、ü 的"点"本身就是一次极短的落笔，
       // 轻点会被误判成清空，把刚写好的字母一起抹掉。长按写字时不会发生，就区分开了。
-      stopHold();
-      holdTimer = setTimeout(function () {
-        holdTimer = null;
-        if (!app.drawing || moved) return;
-        var idx = cellAt(downPos);
-        if (idx >= 0) clearCell(idx);
-        app.drawing = false; // 这次落笔到此为止，抬手时不再补画
-        redraw();
+      s.holdTimer = setTimeout(function () {
+        s.holdTimer = null;
+        if (s.moved) return;
+        s.dead = true;
+        dropStroke(s);          // 这次长按本身不算一笔字
+        if (s.cell >= 0) clearCell(s.cell);
+        geo.redraw();
       }, 550);
-      redraw();
+      geo.redraw();
       e.preventDefault();
     });
     cv.addEventListener('pointermove', function (e) {
-      if (!app.drawing) return;
+      var s = live[e.pointerId];
+      if (!s || s.dead) return;
       var p = posOf(cv, e);
-      if (Math.abs(p.x - downPos.x) > 4 || Math.abs(p.y - downPos.y) > 4) {
-        moved = true;
-        stopHold(); // 已经动笔，就不再算"长按清空"
+      if (Math.abs(p.x - s.downPos.x) > 4 || Math.abs(p.y - s.downPos.y) > 4) {
+        s.moved = true;
+        stopHold(s); // 已经动笔，就不再算"长按清空"
       }
-      var st = list[list.length - 1];
-      if (st) st.pts.push(p);
-      redraw();
+      s.pts.push(p);
+      geo.redraw();
       e.preventDefault();
     });
-    function endDraw() {
-      stopHold();
-      if (!app.drawing) return;
-      app.drawing = false;
+    function endStroke(e) {
+      var s = live[e.pointerId];
+      if (!s) return;
+      stopHold(s);
+      delete live[e.pointerId];
+      if (s.dead) return;
       // 在格子外点了一下（不是写字）：不留痕迹
-      var last = list[list.length - 1];
-      if (last && last.pts && last.pts.length === 1 && last.cell < 0) list.pop();
+      if (s.pts.length === 1 && s.cell < 0) dropStroke(s);
     }
     ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
-      cv.addEventListener(t, endDraw);
+      cv.addEventListener(t, endStroke);
     });
+  }
+
+  // 转屏、软键盘收起都会改画布尺寸。位图尺寸是渲染时定的，之后只靠 CSS
+  // 拉伸的话笔迹会和格子错位 —— 得重新量一次再重画。
+  function refitCanvas() {
+    var c = lastCanvas;
+    if (!c || !c.cv) return;
+    // 页面早就换掉了：lastCanvas 指向的是一个已经离开 DOM 的节点
+    if (el(c.cv.id) !== c.cv) return;
+    setupCanvas(c.cv, c.n, c.editable ? null : c.strokes, c.editable, c.gridType, c.forceCols);
   }
 
   /* ============================== 视图：首页 ============================== */
@@ -516,7 +595,7 @@
       '<h2 class="card-title">家长</h2>' +
       '<button class="btn btn-ghost btn-block" data-act="parent">家长批改' +
       (pending ? '（' + pending + ' 条待批）' : '') + '</button>' +
-      '<button class="btn btn-ghost btn-block" data-act="report">练习报告（题型 · 单元 · 错题）</button>' +
+      '<button class="btn btn-ghost btn-block" data-act="report">练习报告（家长 · 需口令）</button>' +
       '</div>' +
 
       '<p class="footnote">数据只保存在这台设备上，不会上传。</p>';
@@ -611,6 +690,12 @@
           return '<i class="' + cls + '"></i>';
         }).join('');
 
+    // 家长批改时写的批注，下次再练到这个字时要摆出来 ——
+    // 不然"崩少了山字头"这句话家长写完就再也没人看过。
+    var rec = (app.state.stats || {})[keyOf(it)];
+    var parentNote = rec && rec.note
+      ? '<div class="fb-note">家长上次说：' + esc(rec.note) + '</div>' : '';
+
     return '' +
       '<div class="topbar">' +
       '<button class="btn-icon" data-act="quit" title="退出">✕</button>' +
@@ -621,6 +706,7 @@
       '<div class="card card-q">' +
       '<div class="lesson-tag">' + esc(it.no ? (lessonLabel({ no: it.no }) + '《' + it.title + '》') : it.title) + '</div>' +
       '<div class="stem"><span class="stem-label">' + stemLabel + '</span>' + stemBody + '</div>' +
+      parentNote +
       '<div class="write-wrap"><canvas id="writeCanvas"></canvas></div>' +
       '<div class="py-hint">' + hint + '</div>' +
       '<p class="card-note">长按某个格子，可只清空并重写那一个字；写点（i、j 的点）不受影响。</p>' +
@@ -827,7 +913,10 @@
     var wrong = hist.filter(function (h) { return !h.isCorrect; }).slice(-15).reverse();
     var wrongList = wrong.length
       ? '<ul class="tag-list">' + wrong.map(function (h) {
-          return '<li><b>' + esc(h.text) + '</b>' +
+          // 多音字把正确读音一起列出来：家长得知道孩子到底选错了哪个音
+          var ans = String(h.key || '').indexOf('p:') === 0 && h.py
+            ? '（读 ' + esc(h.py) + '）' : '';
+          return '<li><b>' + esc(h.text) + '</b>' + ans +
             (h.note ? '　' + esc(h.note) : '') + '</li>';
         }).join('') + '</ul>'
       : '<p class="card-note">还没有错题。</p>';
@@ -877,7 +966,7 @@
       return render();
     }
     var rng = mulberry32((Date.now() ^ 0x9e3779b1) >>> 0);
-    app.session = shuffle(rng, all).slice(0, SESSION_SIZE);
+    app.session = orderByDue(rng, all).slice(0, SESSION_SIZE);
     app.cursor = 0;
     app.strokes = [];
     app.message = '';
@@ -898,7 +987,10 @@
       return render();
     }
     var rng = mulberry32((Date.now() ^ 0x5bf03635) >>> 0);
-    app.session = shuffle(rng, all);
+    app.session = orderByDue(rng, all);
+    // 选项也得打乱。readings 的顺序是照教材抄的，正确的永远排在第一个 ——
+    // 孩子练到第三题就发现"点最上面那个准没错"，这题等于没出。
+    app.session.forEach(function (it) { it.options = shuffle(rng, it.options); });
     app.cursor = 0;
     app.typed = '';
     app.roundOk = 0;
@@ -961,7 +1053,9 @@
   }
 
   function finishTyped(it, ok, answerText) {
-    recordResult(it, ok, ok ? '' : answerText);
+    // 注意这里不往 recordResult 传 note：自动判分给的那句正确答案不是家长的批注。
+    // 报告里"家长说："和"正确答案"必须是两回事，否则等于把程序的话冒充成家长的话。
+    recordResult(it, ok);
     app.roundTotal = (app.roundTotal || 0) + 1;
     if (ok) app.roundOk = (app.roundOk || 0) + 1;
     app.typed = '';
@@ -975,7 +1069,7 @@
       // 正确答案刚显示出来页面就跳走了，等于没订正。
       app.view = 'done';
     }
-    S.save(app.state);
+    saveState();
     render();
   }
 
@@ -996,11 +1090,15 @@
         mode: it.kind === 'z' ? 'zuci' : (app.state.mode || 'py2word'),
         zuci: it.zuci,
         cells: it.kind === 'z' ? it.cells : it.text.length,
-        perRow: it.kind === 'z' ? it.perRow : 0
+        perRow: it.kind === 'z' ? it.perRow : 0,
+        // 单元在"写"的这一刻就钉死。批改往往是几天以后，那时候家长可能
+        // 已经把单元切到别处 —— 再拿当前的 unit 记账，统计就串到别的单元去了。
+        unit: app.state.unit,
+        no: it.no
       },
       strokes: JSON.parse(JSON.stringify(app.strokes))
     });
-    S.save(app.state);
+    saveState();
 
     app.strokes = [];
     app.cursor++;
@@ -1024,7 +1122,7 @@
     r.attempts++;
     if (isCorrect) {
       r.corrects++;
-      r.level = Math.min(r.level + 1, REVIEW_STEPS.length - 1);
+      r.level = Math.min(r.level + 1, REVIEW_STEPS.length);
       r.dueAt = dueAtFor(r.level);
     } else {
       r.wrongs++;
@@ -1060,10 +1158,15 @@
       ts: Date.now(), key: keyOf(p.item), text: p.item.text, py: p.item.py,
       isCorrect: !!isCorrect, note: app.note || ''
     });
+    // 家长连着批几十条时，这一堆"还没给孩子看"的也会一直涨。
+    // 孩子一次看得过来的就最近那些，留个上限就够了（history 那边同理）。
+    if (app.state.feedback.length > 60) {
+      app.state.feedback = app.state.feedback.slice(-60);
+    }
 
     app.state.pending.shift();
     app.note = '';
-    S.save(app.state);
+    saveState();
     render();
   }
 
@@ -1092,6 +1195,13 @@
   var lastView = null, lastCursor = -1;
 
   function render() {
+    // 家长端只在家长端这两个页面里算"已解锁"，一离开就锁上。
+    // 解锁一次就一直开着的话，家长批到一半把手机递给孩子，孩子接着点就能
+    // 翻到全部答案、还能替自己点"写对了" —— 口令等于只挡第一次。
+    if (app.view !== 'parent' && app.view !== 'report') {
+      app.parentUnlocked = false;
+      app.passInput = '';
+    }
     var root = el('app');
     var html = app.view === 'practice' ? viewPractice()
       : app.view === 'done' ? viewDone()
@@ -1099,7 +1209,9 @@
           : app.view === 'parent' ? viewParent()
             : app.view === 'ref' ? viewRef()
               : viewHome();
-    root.innerHTML = '<div class="view view-' + app.view + '">' + html + '</div>';
+    root.innerHTML = '<div class="view view-' + app.view + '">' +
+      (app.storageWarn ? '<div class="card card-warn">' + esc(app.storageWarn) + '</div>' : '') +
+      html + '</div>';
 
     // 打字/选择题没有画布，setupCanvas 要跳过 —— 否则会拿到 null 报错
     if (app.view === 'practice' && app.session && !isTypedKind(app.session[app.cursor])) {
@@ -1143,20 +1255,20 @@
       // 换单元就把课时退回"整个单元"，否则会停在上一单元那个课次上，题是空的
       if (nu !== app.state.unit) app.state.lesson = 'all';
       app.state.unit = nu;
-      S.save(app.state);
+      saveState();
       return render();
     }
     if (act === 'lesson') {
       app.state.lesson = t.getAttribute('data-l') || 'all';
-      S.save(app.state);
+      saveState();
       return render();
     }
     if (act === 'ack-feedback') {
       app.state.feedback = [];
-      S.save(app.state);
+      saveState();
       return render();
     }
-    if (act === 'mode') { app.state.mode = t.getAttribute('data-m') || 'py2word'; S.save(app.state); return render(); }
+    if (act === 'mode') { app.state.mode = t.getAttribute('data-m') || 'py2word'; saveState(); return render(); }
     if (act === 'start') return startSession();
     if (act === 'start-zuci') return startZuci();
     if (act === 'start-poly') return startPoly();
@@ -1177,7 +1289,18 @@
     if (act === 'clear') { app.strokes = []; app.message = ''; return render(); }
     if (act === 'submit') return submitWriting();
     if (act === 'ref') { app.view = 'ref'; return render(); }
-    if (act === 'report') { app.view = 'report'; return render(); }
+    if (act === 'report') {
+      // 报告里有错题和正确答案，给孩子看不合适：他会照着答案把错字抄一遍，
+      // 而不是真的重写一次。所以报告走家长口令，和批改页同一个门。
+      if (!app.parentUnlocked) {
+        app.view = 'parent';
+        app.passInput = '';
+        app.message = '练习报告也要口令 —— 里面有正确答案，别让孩子照着抄。';
+        return render();
+      }
+      app.view = 'report';
+      return render();
+    }
     if (act === 'parent') {
       app.view = 'parent';
       app.passInput = '';
@@ -1192,7 +1315,7 @@
       }
       app.state.passcode = v;
       app.parentUnlocked = true;
-      S.save(app.state);
+      saveState();
       return render();
     }
     if (act === 'unlock') {
@@ -1218,9 +1341,21 @@
 
   function init() {
     app.state = S.load();
-    if (!app.state.mode) app.state.mode = 'py2word';
+    // 读不出来 = 之前练的全没了。这必须说出来：静默回到空白状态，
+    // 家长只会以为孩子自己清掉了。
+    if (S.loadFailed && S.loadFailed()) {
+      app.storageWarn = '上一次的练习记录读不出来，已经从空白开始。' +
+        '如果不是自己清的，请告诉家长，可能需要重装或换浏览器。';
+    }
     el('app').addEventListener('click', onClick);
     el('app').addEventListener('input', onInput);
+
+    // 转屏、软键盘收起都会改画布宽度，量错一次笔迹就和格子错位
+    window.addEventListener('resize', refitCanvas);
+    if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+      window.visualViewport.addEventListener('resize', refitCanvas);
+    }
+
     render();
   }
 

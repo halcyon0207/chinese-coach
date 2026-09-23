@@ -1,6 +1,6 @@
 {
   "name": "chinese-coach",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "语文小教练：看拼音在田字格里手写，交给家长批改，按间隔复习巩固字词（纯前端，零部署）",
   "scripts": {

@@ -16,12 +16,14 @@
   'use strict';
 
   var KEY = 'chinese-coach-v1';
+  var loadFailed = false;   // 上一次 load 有没有读坏
 
   function defaultState() {
     return {
       version: 1,
       unit: 'U1',        // 当前练的单元
       lesson: 'all',     // 当前练的课时，'all' = 整个单元
+      mode: 'py2word',   // 看拼音写词语 / 看词语写拼音。以前没存，重开页面就跳回默认
       passcode: '',      // 家长口令，空 = 还没设置
       stats: {},         // 'w:奇观' -> { attempts, corrects, wrongs, level, dueAt, lastAt, note }
       pending: [],       // 待家长批改
@@ -30,23 +32,34 @@
     };
   }
 
+  // 类型也要校。只写 `s.history || []` 的话，一个"能 parse 但形状不对"的值
+  // （比如 history 是 {}）会一路混进界面，在 render 里才炸 ——
+  // 表现出来是"打开就白屏"，比回到空白状态难查得多。
+  function obj(v, dflt) { return (v && typeof v === 'object' && !Array.isArray(v)) ? v : dflt; }
+  function arr(v, dflt) { return Array.isArray(v) ? v : dflt; }
+  function str(v, dflt) { return typeof v === 'string' && v ? v : dflt; }
+
   function load() {
+    loadFailed = false;
     try {
       var raw = root.localStorage && root.localStorage.getItem(KEY);
       if (!raw) return defaultState();
       var s = JSON.parse(raw);
+      if (!s || typeof s !== 'object') throw new Error('形状不对');
       var d = defaultState();
       return {
         version: s.version || d.version,
-        unit: s.unit || d.unit,
-        lesson: s.lesson || 'all',
-        passcode: s.passcode || '',
-        stats: s.stats || {},
-        pending: s.pending || [],
-        feedback: s.feedback || [],
-        history: s.history || []
+        unit: str(s.unit, d.unit),
+        lesson: str(s.lesson, '') || 'all',
+        mode: (s.mode === 'word2py') ? 'word2py' : 'py2word',
+        passcode: str(s.passcode, ''),
+        stats: obj(s.stats, {}),
+        pending: arr(s.pending, []),
+        feedback: arr(s.feedback, []),
+        history: arr(s.history, [])
       };
     } catch (e) {
+      loadFailed = true;
       return defaultState();
     }
   }
@@ -68,5 +81,12 @@
     return defaultState();
   }
 
-  return { KEY: KEY, defaultState: defaultState, load: load, save: save, reset: reset };
+  return {
+    KEY: KEY,
+    defaultState: defaultState,
+    load: load,
+    save: save,
+    reset: reset,
+    loadFailed: function () { return loadFailed; }
+  };
 });

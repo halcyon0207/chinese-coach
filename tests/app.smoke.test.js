@@ -54,7 +54,13 @@ function boot(seed) {
   const els = { app: makeEl('app') };
   const canvas = makeCanvas('writeCanvas');
   const bag = {};
-  if (seed) bag[KEY] = JSON.stringify(seed);
+  // 传字符串就当成本机里原本存着的那段原文（测"数据读坏了"这条路）
+  if (seed !== undefined) bag[KEY] = typeof seed === 'string' ? seed : JSON.stringify(seed);
+  let saveBroken = false;
+
+  // 转屏 / 软键盘收起之后 app.js 要重量画布尺寸，所以它挂了 window 级监听。
+  // 这里把监听记下来，测试就能真的"转一次屏"。
+  const winHandlers = {};
 
   // 假定时器：app.js 里唯一的定时器是"长按清空"，测试里手动放行，
   // 免得真等 0.55 秒、也免得长按用例依赖真实时间。
@@ -73,7 +79,10 @@ function boot(seed) {
     clearTimeout: id => { if (id != null) timers[id] = null; },
     localStorage: {
       getItem: k => (k in bag ? bag[k] : null),
-      setItem: (k, v) => { bag[k] = String(v); },
+      setItem: (k, v) => {
+        if (saveBroken) throw new Error('空间满');   // 模拟隐私模式 / 配额满
+        bag[k] = String(v);
+      },
       removeItem: k => { delete bag[k]; }
     },
     document: {
@@ -85,7 +94,11 @@ function boot(seed) {
     },
     scrollTo: noop,
     confirm: () => true,
-    alert: noop
+    alert: noop,
+    // app.js 会挂 resize / visualViewport 监听（转屏、软键盘收起后要重量画布尺寸）
+    addEventListener: (t, fn) => { (winHandlers[t] = winHandlers[t] || []).push(fn); },
+    visualViewport: { addEventListener: (t, fn) => { (winHandlers[t] = winHandlers[t] || []).push(fn); } },
+    requestAnimationFrame: fn => fn()
   };
   sandbox.self = sandbox;
   sandbox.window = sandbox;
@@ -130,8 +143,14 @@ function boot(seed) {
     fire('pointerup', 55, 80);
   }
 
+  // 真的"转一次屏"：先改容器宽度，再触发 app.js 挂上的 resize 监听
+  function resize() {
+    (winHandlers.resize || []).forEach(fn => fn({ type: 'resize' }));
+  }
+
   return {
-    els, sandbox, canvas, click, type, draw, flushTimers,
+    els, sandbox, canvas, click, type, draw, flushTimers, resize,
+    breakSaves: () => { saveBroken = true; },
     html: () => els.app.innerHTML,
     state: () => JSON.parse(bag[KEY] || '{}')
   };
@@ -325,6 +344,158 @@ test('没批改的题不进统计（不能拿没批的东西算掌握度）', ()
   app.click('submit');
   assert.strictEqual(app.state().pending.length, 1);
   assert.deepStrictEqual(app.state().stats, {}, '没批改就不该有任何统计');
+});
+
+/* ==================== 家长端的门 ==================== */
+
+test('练习报告要走家长口令：里面有正确答案', () => {
+  const app = boot({
+    passcode: '1234',
+    history: [{
+      ts: Date.now(), key: 'p:薄·薄雾', text: '薄·薄雾', py: 'bó',
+      isCorrect: false, note: '', unit: 'U1'
+    }]
+  });
+  app.click('report');
+  assert.ok(app.html().includes('请输入口令'), '报告里有错题答案，不该让孩子直接翻');
+  assert.ok(!app.html().includes('最近的错题'), '没过口令就不能看到错题清单');
+
+  app.type('passInput', '1234');
+  app.click('unlock');
+  app.click('report');
+  const html = app.html();
+  assert.ok(html.includes('最近的错题'), '家长解锁之后报告应当能看');
+  assert.ok(html.includes('读 bó'), '错题清单里要把正确读音一起列出来');
+  assert.ok(!html.includes('家长说：'), '程序给的答案不该冒充家长的批注');
+});
+
+test('解锁只管在家长端这几页，回一次首页就重新锁上', () => {
+  const app = boot({ passcode: '1234' });
+  app.click('parent');
+  app.type('passInput', '1234');
+  app.click('unlock');
+  assert.ok(!app.html().includes('请输入口令'), '口令对了应当放行');
+
+  app.click('home');
+  app.click('report');
+  assert.ok(app.html().includes('请输入口令'),
+    '以前解锁一次就一直开着：批到一半把手机递给孩子，他接着点就能替自己点"写对了"');
+});
+
+/* ==================== 判分与记录 ==================== */
+
+test('自动判分给的那句正确答案，不记成家长的批注', () => {
+  const app = boot();
+  app.click('unit', { u: 'U1' });
+  app.click('start-poly');
+
+  const m = /在「([^」]+)」里读什么/.exec(app.html());
+  assert.ok(m, '屏幕上应当是多音字的题干');
+  let rec = null;
+  Data.byId('U1').polyphone.forEach(function (p) {
+    (p.readings || []).forEach(function (r) {
+      if (String(r.eg || '').split('、')[0].trim() === m[1]) {
+        rec = { others: (p.readings || []).filter(function (x) { return x.py !== r.py; }).map(function (x) { return x.py; }) };
+      }
+    });
+  });
+  assert.ok(rec && rec.others.length, '这道题应当有别的读音可选');
+
+  app.click('choose', { v: rec.others[0] });
+  const h = app.state().history;
+  assert.strictEqual(h[h.length - 1].isCorrect, false);
+  assert.strictEqual(h[h.length - 1].note, '',
+    '「这一句是：…」是程序说的，写进 note 就会被报告当成"家长说"');
+});
+
+test('家长的批注，下次练到这个字时会再提一次', () => {
+  const c = Data.byId('U1').lessons[0].chars[0].c;
+  const stats = {};
+  stats['c:' + c] = {
+    attempts: 2, corrects: 1, wrongs: 1, level: 0,
+    dueAt: Date.now() - 1, note: '崩少了山字头'
+  };
+  const app = boot({ passcode: '1234', unit: 'U1', lesson: '1', stats: stats });
+  app.click('start');
+  const html = app.html();
+  assert.ok(html.includes('家长上次说'), '批改页写着"批注会再显示给孩子看"，练的时候就得真的显示');
+  assert.ok(html.includes('崩少了山字头'));
+});
+
+test('练习模式要存下来：重开页面还停在「看词语写拼音」', () => {
+  const app = boot();
+  app.click('mode', { m: 'word2py' });
+  assert.strictEqual(app.state().mode, 'word2py');
+
+  const again = boot(JSON.parse(JSON.stringify(app.state())));
+  assert.ok(/mode-btn on"[^>]*>看词语写拼音/.test(again.html()),
+    '模式以前没进存储白名单，重开一次就跳回默认，孩子又练了一遍会写的');
+});
+
+test('多音字选项每轮换位置：正确的不永远排在第一个', () => {
+  // 例词 → 这个字的全部读音 + 这里该读哪个
+  function readingsOf(eg) {
+    let all = null, right = null;
+    Data.byId('U1').polyphone.forEach(function (p) {
+      (p.readings || []).forEach(function (r) {
+        if (String(r.eg || '').split('、')[0].trim() === eg) {
+          all = (p.readings || []).map(function (x) { return x.py; }).sort();
+          right = r.py;
+        }
+      });
+    });
+    return { all: all, right: right };
+  }
+
+  const app = boot();
+  app.click('unit', { u: 'U1' });
+  app.click('start-poly');
+
+  let total = 0, notFirst = 0;
+  for (let i = 0; i < 30; i++) {
+    const m = /在「([^」]+)」里读什么/.exec(app.html());
+    if (!m) break;                        // 题干没了 = 这一轮做完
+    const q = readingsOf(m[1]);
+    assert.ok(q.right, '屏幕上的例词「' + m[1] + '」在数据里找不到');
+    const opts = (app.html().match(/data-act="choose" data-v="([^"]+)"/g) || [])
+      .map(function (s) { return /data-v="([^"]+)"/.exec(s)[1]; });
+    assert.deepStrictEqual(opts.slice().sort(), q.all, '选项还得是这个字的全部读音，不能少给');
+    total++;
+    if (opts[0] !== q.right) notFirst++;
+    app.click('choose', { v: q.right });
+  }
+  assert.ok(total >= 6, 'U1 多音字一轮不该只有 ' + total + ' 题');
+  assert.ok(notFirst > 0,
+    '十二道题全把正确读音摆第一个，孩子练到第三题就只点最上面那个了');
+});
+
+test('存不进去、读坏了都要在首页明说，不能静默', () => {
+  const app = boot();
+  app.breakSaves();
+  app.click('unit', { u: 'U3' });
+  assert.ok(app.html().includes('存不下练习记录'),
+    '隐私模式 / 配额满时 setItem 会抛，以前只 console.warn：孩子的字白写了一晚上');
+
+  const broken = boot('{oops');
+  assert.ok(broken.html().includes('读不出来'),
+    '数据坏掉时静默回到空白，家长只会以为孩子自己清掉了');
+});
+
+/* ==================== 画布随屏幕转 ==================== */
+test('转屏之后画布重新量一次，一次落笔仍然只是一笔', () => {
+  const app = boot();
+  app.click('start');
+  assert.ok(app.canvas.width > 0, '画布应当已经按容器宽度铺好');
+
+  app.canvas.parentNode.clientWidth = 200;   // 转成竖屏，窄了一截
+  app.resize();
+  assert.strictEqual(app.canvas.width, 200,
+    '位图宽度不跟着改的话，笔迹会和格子错位，家长看到的是歪的');
+
+  app.draw();
+  app.click('submit');
+  assert.strictEqual(app.state().pending[0].strokes.length, 1,
+    '重量尺寸时不能把指针事件再绑一遍：一笔被记成两笔，家长批的就不是孩子写的那个字');
 });
 
 /* ==================== 资料查阅 ==================== */
