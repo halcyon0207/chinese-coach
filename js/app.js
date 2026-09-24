@@ -169,6 +169,9 @@
           kind: 'r',
           text: line,
           title: item.title,
+          // 带上单元：默写题也会混进跨单元的复习轮次里，没这一项就只好按"当前
+          // 选中的单元"记账 —— 报告里按单元统计会串到别的单元去。
+          unit: unitId,
           py: '',
           // 第一句没有"上一句"可给。原来这里塞的是标题，
           // 孩子看到标题并不知道该从哪儿写起 —— 直接说明是开头。
@@ -218,6 +221,28 @@
     });
     return shuffle(rng, due)
       .concat(shuffle(rng, fresh), shuffle(rng, rest));
+  }
+
+  // 今天到期的题，跨全部单元一起数。首页那句「今天该复习」和「就练这些」都用它。
+  //
+  // 以前"到期"只体现在排队顺序里：引擎自己知道，孩子看不见 ——
+  // 看不见就不会去点，间隔复习排得再准也白搭（报告里那个数字只有家长看得到）。
+  // 同一个字在两课里都出现时算一条（复习排期本来就是按"字词"记的，不是按课记的）。
+  function dueItems() {
+    var now = Date.now();
+    var st = app.state.stats || {};
+    var seen = {}, out = [];
+    D.UNITS.forEach(function (u) {
+      itemsForLesson(u.id, 'all')
+        .concat(itemsForZuci(u.id, 'all'), itemsForPoly(u.id), itemsForRecite(u.id))
+        .forEach(function (it) {
+          var k = keyOf(it);
+          if (seen[k]) return;
+          var r = st[k];
+          if (r && r.dueAt && r.dueAt <= now) { seen[k] = 1; out.push(it); }
+        });
+    });
+    return out;
   }
 
   function buildSession(unitId, lesson) {
@@ -826,6 +851,24 @@
       '</div>';
   }
 
+  // 首页的「今天该复习」：把到期的摆出来，再给一个"只练这些"的入口。
+  //
+  // 这是间隔复习唯一能被孩子看见的地方 —— 报告里那句"今天到期该复习 N 个"
+  // 在口令后面，只有家长看得到；而复习这件事得孩子自己去点才会发生。
+  function dueCard() {
+    var list = dueItems();
+    if (!list.length) return '';
+    var names = list.slice(0, 10).map(function (it) { return esc(it.text); }).join('、');
+    return '<div class="card card-due">' +
+      '<h2 class="card-title">今天该复习（' + list.length + '）</h2>' +
+      '<p class="card-note">按 1/2/4/7/15 天的节奏，这些今天到期了。现在过一遍，' +
+      '比过几天再捡起来省力得多。</p>' +
+      '<p class="card-note">' + names + (list.length > 10 ? ' 等' : '') + '</p>' +
+      '<button class="btn btn-primary btn-block" data-act="start-due">' +
+      '就练这些（' + list.length + '）</button>' +
+      '</div>';
+  }
+
   function viewHome() {
     var st = app.state;
     var pending = st.pending.length;
@@ -869,6 +912,8 @@
       '</div>' +
 
       feedbackCard() +
+
+      dueCard() +
 
       progressCard() +
 
@@ -1567,6 +1612,30 @@
     render();
   }
 
+  // 只练今天到期的那些（跨单元）。这一轮不掺新字 —— 复习就是复习。
+  function startDue() {
+    var list = dueItems();
+    if (!list.length) {
+      // 数据被别处改过（比如刚在另一台设备上批完）时走到这儿，别把孩子丢进空题目
+      app.message = '今天没有到期的，练点别的也一样。';
+      return render();
+    }
+    var rng = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
+    app.session = orderByDue(rng, list);
+    // 多音字的选项每轮换位置：正确读音永远排第一个的话，孩子练两题就开始点最上面那个
+    app.session.forEach(function (it) {
+      if (it.options) it.options = shuffle(rng, it.options);
+    });
+    app.cursor = 0;
+    app.strokes = [];
+    app.typed = '';
+    app.roundOk = 0;
+    app.roundTotal = 0;
+    app.message = '';
+    app.view = 'practice';
+    render();
+  }
+
   // 默写判分要容错。孩子用的是手机输入法，多打一个空格、少打一个标点
   // 不该算错 —— 去掉空白和标点只比"字对不对"。
   function normRecite(s) {
@@ -1640,10 +1709,13 @@
       return render();
     }
     var it = app.session[app.cursor];
+    // 复习轮次是跨单元的，这时候题自己的 unit 才是对的；
+    // 单单元练习里两者一样，取 it.unit 也照旧。
+    var itUnit = it.unit || app.state.unit;
     app.state.pending.push({
       id: 'p' + Date.now() + Math.floor(Math.random() * 1000),
       ts: Date.now(),
-      unit: app.state.unit,
+      unit: itUnit,
       item: {
         kind: it.kind,
         text: it.text,
@@ -1654,7 +1726,7 @@
         perRow: it.kind === 'z' ? it.perRow : 0,
         // 单元在"写"的这一刻就钉死。批改往往是几天以后，那时候家长可能
         // 已经把单元切到别处 —— 再拿当前的 unit 记账，统计就串到别的单元去了。
-        unit: app.state.unit,
+        unit: itUnit,
         no: it.no
       },
       strokes: cleanStrokes(app.strokes)
@@ -1918,6 +1990,7 @@
     if (act === 'start-zuci') return startZuci();
     if (act === 'start-poly') return startPoly();
     if (act === 'start-recite') return startRecite();
+    if (act === 'start-due') return startDue();
     // 选了读音就直接判：少一次"确认"的点击，孩子不容易走神
     if (act === 'choose') {
       app.typed = t.getAttribute('data-v') || '';

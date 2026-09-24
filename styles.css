@@ -66,6 +66,8 @@ html, body {
 .card-cta { border-color: var(--primary); }
 .card-warn { background: var(--warn-bg); border-color: var(--warn); }
 .card-quiet { background: transparent; box-shadow: none; }
+/* 首页的「今天该复习」：不是警告，所以要显眼但不吓人 */
+.card-due { border-color: var(--primary); background: var(--soft); }
 
 .card-title { font-size: 16px; margin: 0 0 6px; }
 .card-note { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
