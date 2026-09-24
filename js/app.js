@@ -1187,15 +1187,15 @@
         '<h2 class="card-title">跨设备同步</h2>' +
         '<p class="card-note">开了之后：孩子在平板上写的字，你在自己手机上就能批；' +
         '批完的结果自动回到孩子那台设备。不用点同步，也不用在同一台设备上。</p>' +
-        '<div class="action-row">' +
-        '<button class="btn btn-primary" data-act="sync-on">生成一个家庭码</button>' +
-        '</div>' +
-        '<p class="card-note">另一台设备已经生成过的话，直接把那个码填进来：</p>' +
+        // 顺序是刻意的：先问"另一台设备是不是已经有码了"。
+        // 各生成各的 = 两个互不相通的家庭，界面都显示"已开启"，但永远看不到对方的作业。
+        '<p class="card-note"><b>已经有一台设备生成过家庭码了吗？把那个码填进来：</b></p>' +
         '<input id="famInput" class="pass-input" type="text" placeholder="xxxx-xxxx-xxxx" ' +
         'autocomplete="off" value="' + esc(app.famInput || '') + '">' +
-        '<div class="action-row">' +
-        '<button class="btn btn-soft" data-act="sync-join">用这个码</button>' +
-        '</div>' +
+        '<button class="btn btn-primary btn-block" data-act="sync-join">用这个码</button>' +
+        '<p class="card-note">没有的话，在这台设备上生成一个 —— ' +
+        '<b>另一台已经生成过就别点这个</b>，那就是两个家庭了。</p>' +
+        '<button class="btn btn-ghost btn-block" data-act="sync-on">这台是第一个，生成新码</button>' +
         (app.cloudMsg ? '<div class="feedback warn">' + esc(app.cloudMsg) + '</div>' : '') +
         '</div>';
     }
@@ -1834,20 +1834,32 @@
     if (act === 'grade-bad') return gradeCurrent(false);
 
     /* ---- 跨设备同步（只在家长报告页里能点到） ---- */
-    if (act === 'sync-on' || act === 'sync-new') {
+    if (act === 'sync-on') {
       if (!F) return;
-      // enable 自己会校验格式，返回"到底开没开"
+      // enable 自己会校验，返回"到底开没开"
       app.cloudMsg = F.enable(F.newCode()) ? '' : '没能开启同步，再点一次试试。';
+      saveState();
+      return render();
+    }
+    if (act === 'sync-new') {
+      if (!F) return;
+      // 换码 = 换家庭：已经填了旧码的设备会全部失联，得挨个重填
+      if (!window.confirm('换码之后，已经填了旧码的设备会失联，得重新填新码。确定换吗？')) return;
+      app.cloudMsg = F.enable(F.newCode()) ? '' : '没能换码，再点一次试试。';
       saveState();
       return render();
     }
     if (act === 'sync-join') {
       if (!F) return;
       var code = String(app.famInput || '').trim().toLowerCase();
-      if (!F.enable(code)) {
-        app.cloudMsg = '家庭码是 12 位，形如 xxxx-xxxx-xxxx（字母和数字，中间两道横杠）。';
+      var why = F.codeError(code);
+      if (why) {
+        app.cloudMsg = why === 'checksum'
+          ? '这个码抄错了一位（最后那位对不上），照着另一台设备再核一遍。'
+          : '家庭码是 12 位，形如 xxxx-xxxx-xxxx（字母和数字，中间两道横杠）。';
         return render();
       }
+      F.enable(code);
       app.famInput = '';
       app.cloudMsg = '';
       saveState();

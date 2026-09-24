@@ -26,6 +26,9 @@
   // 结果是每次请求都被服务端打回来，而界面只说一句"同步暂不可用"，
   // 家长分不清到底是网不好还是码填错了，而且这个错状态还会一直存在本机。
   var FAM_RE = /^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/;
+  // 去掉了 0/o、1/l 这些念错抄错的字符，剩下 31 个（质数，校验位靠它）。
+  // 必须和云函数 lib/sync.js 的 CODE_ABC 完全一致。
+  var CODE_ABC = 'abcdefghijkmnpqrstuvwxyz2345678';
   // 接口版本。云函数会对着它校验：以后改了 action 名或响应结构，
   // 还留在用户浏览器里的老页面会拿到"请刷新页面"，而不是一堆看不懂的报错。
   var API_VERSION = 1;
@@ -41,14 +44,37 @@
 
   // 家庭码：3 段 4 位，去掉了 0/o/1/l 这些容易念错抄错的字符 ——
   // 它是靠"家长念给另一台设备听"或者扫一下传过去的，念错一个字就得重来。
+  // 校验位算法必须和云函数 lib/sync.js 的 codeCheckChar 一致（改要两边一起改）。
+  //
+  // 为什么最后一位要做校验：服务端不记录"现在有哪些家庭码"，所以抄错一位的码
+  // 格式照样合法 —— 家长会静默连进一个空家庭，界面显示"已开启"，
+  // 但永远看不到孩子的作业，而且查不出原因。加一位校验，抄错当场拦下。
+  function checkChar(body) {
+    var sum = 0;
+    for (var i = 0; i < body.length; i++) {
+      var idx = CODE_ABC.indexOf(body.charAt(i));
+      sum += (idx < 0 ? 0 : idx + 1) * (i + 1);
+    }
+    return CODE_ABC.charAt(sum % CODE_ABC.length);
+  }
+
   function newCode() {
-    var abc = 'abcdefghijkmnpqrstuvwxyz23456789';
-    function seg() {
+    function seg(n) {
       var s = '';
-      for (var i = 0; i < 4; i++) s += abc.charAt(Math.floor(Math.random() * abc.length));
+      for (var i = 0; i < n; i++) s += CODE_ABC.charAt(Math.floor(Math.random() * CODE_ABC.length));
       return s;
     }
-    return seg() + '-' + seg() + '-' + seg();
+    var all = seg(4) + seg(4) + seg(3);   // 前 11 位随机
+    all += checkChar(all);                // 第 12 位 = 校验位
+    return all.slice(0, 4) + '-' + all.slice(4, 8) + '-' + all.slice(8, 12);
+  }
+
+  // '' = 没问题；'format' = 根本不是这个格式；'checksum' = 格式对，但抄错了一位
+  function codeError(code) {
+    var cleaned = String(code || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!FAM_RE.test(cleaned)) return 'format';
+    var body = cleaned.replace(/-/g, '');
+    return checkChar(body.slice(0, 11)) === body.charAt(11) ? '' : 'checksum';
   }
 
   function newDev() {
@@ -269,16 +295,16 @@
     sync();
   }
 
-  // 返回"到底开没开"：格式不对就当没开（而不是开着但永远失败）
+  // 返回"到底开没开"：码不对就当没开（而不是开着但永远失败）
   function enable(code) {
     var s = sync();
     if (!s) return false;
+    var err = codeError(code);
     var cleaned = String(code || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
-    var valid = FAM_RE.test(cleaned);
-    s.fam = valid ? cleaned : '';
-    s.on = valid;
-    if (valid && !s.name) s.name = '设备';
-    return valid;
+    s.fam = err ? '' : cleaned;
+    s.on = !err;
+    if (!err && !s.name) s.name = '设备';
+    return !err;
   }
 
   function disable() {
@@ -314,6 +340,7 @@
     enable: enable,
     disable: disable,
     newCode: newCode,
+    codeError: codeError,
     statusText: statusText,
     markWorkDirty: markWorkDirty,
     flushWork: flushWork,

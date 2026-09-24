@@ -113,7 +113,9 @@ function boot() {
     fire('pointerup', 60, 50);
   }
 
-  return { sandbox, els, calls, click, type, draw, bag };
+  // 用真算法生成一个合法家庭码（最后一位是校验位，硬编码的码过不了校验）
+  const fam = sandbox.FamilySync.newCode();
+  return { sandbox, els, calls, click, type, draw, bag, fam };
 }
 
 function flush() { return new Promise(r => setImmediate(r)); }
@@ -231,7 +233,7 @@ test('开了家庭码：批改会传上去，别处写的作业不进本机统�
   const app = t.sandbox.__cc.app;
 
   // 开启同步（模拟家长在报告页生成了家庭码）
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   assert.ok(t.sandbox.FamilySync.on());
 
   // 本机先清空 pending，再放一条"别的设备"传上来的作业
@@ -266,7 +268,7 @@ test('开了家庭码：批改会传上去，别处写的作业不进本机统�
 
 test('作业是整轮写完才传一次，不是写一个传一个', async () => {
   const t = boot();
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   t.click('start');
 
   // 一课的字太多，截成 2 条好把这一轮跑完
@@ -290,7 +292,7 @@ test('作业是整轮写完才传一次，不是写一个传一个', async () =>
 
 test('写到一半退出：已经写的那几条也要传上去', async () => {
   const t = boot();
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   t.click('start');
   t.draw();
   t.click('submit');
@@ -316,13 +318,13 @@ test('家庭码格式不对：等于没开，也不会发请求（不能出现"�
   assert.strictEqual(t.calls.length, 0, '没开就一次请求都不发');
 
   // 换成正确的码就能开
-  assert.strictEqual(t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p'), true);
+  assert.strictEqual(t.sandbox.FamilySync.enable(t.fam), true);
   assert.strictEqual(t.sandbox.FamilySync.on(), true);
 });
 
 test('上传失败：dirty 恢复，下一次 flush 把积压的带走', async () => {
   const t = boot();
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
 
   // 第一次：网络断了
   t.sandbox.fetch = (url, opts) => {
@@ -366,7 +368,7 @@ function seedPending(app, n) {
 test('批改攒一批才传：批 3 条只发一次请求', async () => {
   const t = boot();
   const app = t.sandbox.__cc.app;
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   seedPending(app, 3);
 
   t.click('parent');
@@ -391,7 +393,7 @@ test('批改攒一批才传：批 3 条只发一次请求', async () => {
 test('批到一半离开批改页：攒下的也要传走，不能丢', async () => {
   const t = boot();
   const app = t.sandbox.__cc.app;
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   seedPending(app, 3);
 
   t.click('parent');
@@ -411,7 +413,7 @@ test('批到一半离开批改页：攒下的也要传走，不能丢', async ()
 test('两个家长同时批同一条：先到的为准，后到的要说一句', async () => {
   const t = boot();
   const app = t.sandbox.__cc.app;
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
   seedPending(app, 1);
 
   // 服务端说：这条别人已经批过了（先到为准，我这条没生效）
@@ -435,7 +437,7 @@ test('家长在自己手机上看报告：本机一条记录都没有，也能�
 
   // 这台设备（家长的手机）从没练过
   app.state.history = [];
-  t.sandbox.FamilySync.enable('k3f9-7wq2-xm4p');
+  t.sandbox.FamilySync.enable(t.fam);
 
   // 云端只有孩子那台设备上传的快照
   t.sandbox.fetch = () => Promise.resolve({
