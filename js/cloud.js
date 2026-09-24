@@ -35,6 +35,9 @@
 
   var state = null;       // 指向 app.state（里面有 sync 那一段）
   var hooks = {};         // { applyGrades, onStatus }
+  // 哪个项目在用它。由 init() 传进来（'chinese' / 'math'）——
+  // 两个项目共用同一份 cloud.js，差异只在这里，免得复制的时候忘了改。
+  var APP = 'chinese';
   var busy = false;
   var lastAt = 0;
   var lastError = '';
@@ -106,6 +109,7 @@
   // 所有请求都从这里走：超时就放弃（不阻塞），失败只记一句状态
   function post(body) {
     body.v = API_VERSION;
+    body.app = APP;   // 语文 / 数学共用同一个家庭码，靠这个隔开两边的数据
     var ctl = setTimeoutFetch();
     var opts = {
       method: 'POST',
@@ -289,9 +293,11 @@
 
   /* ------------------------------ 对外 ------------------------------ */
 
-  function init(appState, h) {
+  // h 里可以传 { applyGrades, onGraded, onStatus }；appName 是 'chinese' / 'math'
+  function init(appState, h, appName) {
     state = appState;
     hooks = h || {};
+    if (typeof appName === 'string' && appName) APP = appName;
     sync();
   }
 
