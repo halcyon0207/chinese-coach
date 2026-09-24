@@ -17,14 +17,20 @@
 <!--
   加载顺序不能变：
     data   → 字词数据（写字表 / 词语表 / 多音字，带拼音）
+    recite → 背诵默写素材（手工录入、对过教材 PDF）
+    jiaoan → 教案数据（课堂进度 / 每课目标重难点 / 写字要点）
     store  → 本地存储
+    cloud  → 跨设备同步（可选，没开家庭码时全是空转）
     app    → 界面
   刻意用普通 script 而不是 ES module：这样直接双击 index.html 也能跑，不用起服务器。
 -->
 <script src="js/data.js"></script>
 <script src="js/recite.js"></script>
-<script src="js/store.js"></script>
-<script src="js/app.js"></script>
+<script src="js/jiaoan.js"></script>
+<!-- 改动的脚本带版本号：GitHub Pages 的缓存很顽固，不加会一直用旧文件 -->
+<script src="js/store.js?v=20260924"></script>
+<script src="js/cloud.js?v=20260924"></script>
+<script src="js/app.js?v=20260924"></script>
 
 </body>
 </html>

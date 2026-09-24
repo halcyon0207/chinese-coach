@@ -28,7 +28,8 @@
       stats: {},         // 'w:奇观' -> { attempts, corrects, wrongs, level, dueAt, lastAt, note }
       pending: [],       // 待家长批改
       feedback: [],      // 家长刚批改完、还没给孩子看的结果
-      history: []        // 已批改
+      history: [],       // 已批改
+      sync: null         // 跨设备同步（家庭码 / 设备标识），见 js/cloud.js；没开就是 null
     };
   }
 
@@ -56,7 +57,8 @@
         stats: obj(s.stats, {}),
         pending: arr(s.pending, []),
         feedback: arr(s.feedback, []),
-        history: arr(s.history, [])
+        history: arr(s.history, []),
+        sync: obj(s.sync, { on: false, fam: '', dev: '', name: '', lastAt: 0 })
       };
     } catch (e) {
       loadFailed = true;

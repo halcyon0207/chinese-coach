@@ -21,7 +21,10 @@
 
   var D = window.ChineseData;
   var R = window.ReciteData;
+  var J = window.JiaoanData || null;   // 教案数据，没有也能跑（只是少了"课堂进度"这些）
   var S = window.Store;
+  // 跨设备同步。没引 cloud.js 时这里是 null，所有同步调用都跳过，项目照常跑。
+  var F = (typeof window !== 'undefined' && window.FamilySync) ? window.FamilySync : null;
 
   // 间隔复习阶梯：答对就往后推一档，答错退回第一天
   var REVIEW_STEPS = [1, 2, 4, 7, 15];
@@ -39,6 +42,12 @@
     parentUnlocked: false,
     passInput: '',
     note: '',
+    // 别的设备传上来等批改的作业（只在内存里，不落本地存储）
+    cloudWork: [],
+    cloudReports: [],
+    cloudMsg: '',
+    famInput: '',
+    acked: [],          // 已经应用过的批改结果 id，下次联网时回执给云端删掉
     // 默写/打字题的输入内容。手写题走的是 strokes（笔迹），两套互不干扰。
     typed: '',
     // 这一轮自动判分题的成绩。手写题不统计 —— 它们要等家长批才算数。
@@ -293,19 +302,45 @@
     ctx.restore();
   }
 
-  function drawStrokes(ctx, strokes) {
+  // 笔迹存的是"格子里的相对位置"（cell + u/v），不是画布像素。
+  //
+  // 为什么必须改：跨设备批改之后，孩子在平板上写的字要在家长的手机上回放，
+  // 两台设备画布宽度不一样（平板 700px、手机 360px），像素坐标画出来会偏出格子 ——
+  // 家长看到的就不是孩子写的那个字了。存相对位置，回放时按本地格子还原，
+  // 横屏竖屏、大屏小屏都落在同一个田字格的同一个位置。
+  //
+  // 旧格式（历史笔迹，直接是像素点）照原样画，不至于让老记录变成一片乱线。
+  function pointXY(pt, st, geo) {
+    if (!pt || typeof pt.u !== 'number') return { x: pt.x, y: pt.y };
+    var lay = geo && geo.L;
+    var cell = (st && typeof st.cell === 'number') ? st.cell : -1;
+    if (lay && cell >= 0 && cell < (geo.n || 0) && lay.w > 0 && lay.h > 0) {
+      var col = cell % lay.cols, row = Math.floor(cell / lay.cols);
+      var x = lay.pad + col * (lay.w + lay.gap);
+      var y = lay.pad + row * (lay.h + lay.gap);
+      return { x: x + pt.u * lay.w, y: y + pt.v * lay.h };
+    }
+    // 落在格子外的点：按整块画布的比例还原
+    return { x: pt.u * (geo.W || 1), y: pt.v * (geo.H || 1) };
+  }
+
+  function drawStrokes(ctx, strokes, geo) {
     ctx.strokeStyle = '#e8590c';
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     (strokes || []).forEach(function (st) {
-      // 兼容两种格式：新格式 {cell, pts}，旧格式（历史笔迹）直接是点数组
+      // 兼容两种格式：新格式 {cell, pts:[{u,v}]}，旧格式（历史笔迹）直接是点数组
       var pts = st && st.pts ? st.pts : st;
       if (!pts || !pts.length) return;
       ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      if (pts.length === 1) ctx.lineTo(pts[0].x + 0.5, pts[0].y + 0.5);
+      var first = pointXY(pts[0], st, geo);
+      ctx.moveTo(first.x, first.y);
+      for (var i = 1; i < pts.length; i++) {
+        var p = pointXY(pts[i], st, geo);
+        ctx.lineTo(p.x, p.y);
+      }
+      if (pts.length === 1) ctx.lineTo(first.x + 0.5, first.y + 0.5);
       ctx.stroke();
     });
   }
@@ -372,7 +407,7 @@
     function redraw() {
       ctx.clearRect(0, 0, W, H);
       drawCells(ctx, n, W, geo.grid, forceCols);
-      drawStrokes(ctx, geo.list);
+      drawStrokes(ctx, geo.list, geo);
     }
     geo.redraw = redraw;
     redraw();
@@ -397,6 +432,19 @@
       }
     }
 
+    // 落笔的位置记成"第几个格子 + 格内相对位置"，不记像素
+    function normOf(p) {
+      var lay = geo.L;
+      var c = cellAt(p);
+      if (c >= 0 && lay && lay.w > 0 && lay.h > 0) {
+        var col = c % lay.cols, row = Math.floor(c / lay.cols);
+        var x = lay.pad + col * (lay.w + lay.gap);
+        var y = lay.pad + row * (lay.h + lay.gap);
+        return { cell: c, u: (p.x - x) / lay.w, v: (p.y - y) / lay.h };
+      }
+      return { cell: -1, u: p.x / (W || 1), v: p.y / (H || 1) };
+    }
+
     // 每根手指各记各的一笔。以前全页共用一个"正在画"开关和一条折线，
     // 两根手指同时写（手掌蹭到屏、换手时没抬起来）会把两笔连成一条线，
     // 家长看到的就是一个从来没写过的怪符号。
@@ -416,7 +464,9 @@
     cv.addEventListener('pointerdown', function (e) {
       if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) {} }
       var p = posOf(cv, e);
-      var s = { cell: cellAt(p), pts: [p], downPos: p, moved: false, holdTimer: null };
+      // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"
+      var np = normOf(p);
+      var s = { cell: np.cell, pts: [np], downPos: p, moved: false, holdTimer: null, norm: true };
       geo.list.push(s);
       live[e.pointerId] = s;
       // 长按（按住不动约 0.55 秒）= 清空该格，单独重写这一个字。
@@ -441,7 +491,7 @@
         s.moved = true;
         stopHold(s); // 已经动笔，就不再算"长按清空"
       }
-      s.pts.push(p);
+      s.pts.push(normOf(p));
       geo.redraw();
       e.preventDefault();
     });
@@ -470,6 +520,149 @@
   }
 
   /* ============================== 视图：首页 ============================== */
+  /* ====================== 教案：课堂进度 / 本课重点 ====================== */
+  /*
+   * js/jiaoan.js 由 scripts/gen_jiaoan.py 从教案 docx 生成，能给的是三样东西：
+   *   1. 教学进度表：这周课堂讲到第几课（首页「本周课堂」）
+   *   2. 每课的教学目标 / 重点 / 难点 / 分层作业（资料页「本课重点」）
+   *   3. 写字指导里逐字的结构、笔顺、易错笔画（资料页 + 家长批改时的参考）
+   *
+   * 它**不**提供课文原文、古诗、日积月累 —— 那是二手整理，默写必须以教材 PDF 为准。
+   * 教案自己带的错（陀螺 / 王戎不取道旁李 的课次标反了）也已在生成时避开：
+   * 课次一律按 js/data.js 认，教案只补课次以外的字段。
+   */
+
+  // 进度表里的日期没写年份（"9.1-9.4"），按"9 月开学"补：
+  // 9—12 月算学期起始年，1 月算下一年。
+  function weekRange(dateStr, startYear) {
+    var m = /^(\d{1,2})\.(\d{1,2})\s*[-—~]\s*(\d{1,2})\.(\d{1,2})$/.exec(dateStr || '');
+    if (!m) return null;
+    var am = +m[1], ad = +m[2], bm = +m[3], bd = +m[4];
+    return {
+      from: new Date(am >= 9 ? startYear : startYear + 1, am - 1, ad),
+      to: new Date(bm >= 9 ? startYear : startYear + 1, bm - 1, bd, 23, 59, 59)
+    };
+  }
+
+  function currentWeek(today) {
+    if (!J || !J.weeks || !J.weeks.length) return null;
+    today = today || new Date();
+    var sy = today.getMonth() + 1 >= 9 ? today.getFullYear() : today.getFullYear() - 1;
+    var hit = null, next = null;
+    J.weeks.forEach(function (w) {
+      var r = weekRange(w.date, sy);
+      if (!r) return;
+      if (today >= r.from && today <= r.to) hit = { w: w, range: r, now: true };
+      else if (!next && r.from > today) next = { w: w, range: r, now: false };
+    });
+    // 假期里（今天不在任何一周内）就给下一周，让家长提前知道开学要上什么
+    return hit || next || null;
+  }
+
+  // "1.观潮（3）2.繁星（2）" → [{name:'观潮',periods:3},{name:'繁星',periods:2}]
+  function weekItems(w) {
+    var text = (w.content || []).join('');
+    var out = [];
+    var re = /([^（(]+)[（(](\d+)[）)]/g;
+    var m;
+    while ((m = re.exec(text))) {
+      // "6.方帽子店" / "7*田忌赛马" / "3*现代诗二首" —— 前面的课次和星号都要去掉，
+      // 漏了点号的话会留下 ".方帽子店"，就匹配不上第 6 课了
+      var name = m[1].trim().replace(/^\d+\s*[.．、]?\s*[*＊]?\s*/, '');
+      if (name) out.push({ name: name, periods: +m[2] });
+    }
+    return out;
+  }
+
+  // 进度表只写"1.观潮"，没写第几单元。课表是顺着上的，
+  // 所以从第 1 周往后扫，单元指针只往前走、不回头 —— 这样第八单元的《古诗三首》
+  // 不会被认成第三单元那一个。
+  var weekPlanCache = null;
+  function weekPlan() {
+    if (weekPlanCache || !J) return weekPlanCache;
+    weekPlanCache = [];
+    var ptr = 0;
+    J.weeks.forEach(function (w) {
+      var items = weekItems(w).map(function (it) {
+        var found = null;
+        for (var i = ptr; i < D.UNITS.length && !found; i++) {
+          for (var k = 0; k < D.UNITS[i].lessons.length; k++) {
+            var t = D.UNITS[i].lessons[k].title || '';
+            if (t.indexOf(it.name) === 0 || it.name.indexOf(t) === 0) {
+              found = { unit: D.UNITS[i].id, no: D.UNITS[i].lessons[k].no, idx: i };
+              break;
+            }
+          }
+        }
+        if (found) ptr = found.idx;
+        return { name: it.name, periods: it.periods,
+                 unit: found ? found.unit : '', no: found ? found.no : 0 };
+      });
+      weekPlanCache.push({ w: w.w, date: w.date, note: w.note, items: items });
+    });
+    return weekPlanCache;
+  }
+
+  function progressCard() {
+    var plan = weekPlan();
+    var cw = currentWeek();
+    if (!plan || !cw) return '';
+    var row = null;
+    plan.forEach(function (p) { if (p.w === cw.w.w) row = p; });
+    if (!row || !row.items.length) return '';
+
+    var btns = row.items.map(function (it) {
+      if (!it.unit) {
+        return '<span class="lesson-off">' + esc(it.name) + '（' + it.periods + ' 节）</span>';
+      }
+      return '<button class="unit-btn" data-act="goto-lesson" data-u="' + esc(it.unit) +
+        '" data-l="' + esc(it.no) + '">' + esc(it.name) +
+        '（' + it.periods + ' 节）</button>';
+    }).join('');
+
+    return '<div class="card card-cta">' +
+      '<h2 class="card-title">' + (cw.now ? '本周课堂' : '下一周课堂') +
+      '　第 ' + row.w + ' 周 ' + esc(row.date) + '</h2>' +
+      '<p class="card-note">' + (cw.now
+        ? '学校这周讲到这儿。点一下就跳到那一课，练的字和课堂对得上。'
+        : '现在是假期，先看看开学第一周要上什么。') + '</p>' +
+      '<div class="unit-row">' + btns + '</div>' +
+      '</div>';
+  }
+
+  // 某一课在教案里的全部课时（一课往往占 2～3 节，要点分散在各节里）
+  function jiaoanLessons(unitId, no) {
+    if (!J) return [];
+    var u = J.byId(unitId);
+    if (!u) return [];
+    return u.lessons.filter(function (l) { return String(l.no) === String(no); });
+  }
+
+  function jiaoanTipsOf(unitId, no) {
+    var out = [];
+    jiaoanLessons(unitId, no).forEach(function (l) {
+      (l.writing || []).forEach(function (t) { out.push(t); });
+    });
+    return out;
+  }
+
+  // 这道题（一个词或一个字）里，教案点了哪几个字的写法
+  function tipsForItem(it) {
+    if (!J || !it || !it.unit) return [];
+    var all = jiaoanTipsOf(it.unit, it.no);
+    if (!all.length) return [];
+    var chars = String(it.text || '').split('');
+    return all.filter(function (t) { return chars.indexOf(t.c) >= 0; });
+  }
+
+  function listBlock(title, arr, cls) {
+    if (!arr || !arr.length) return '';
+    return '<div class="ja-block"><div class="ja-label">' + title + '</div>' +
+      arr.map(function (s) {
+        return '<div class="' + (cls || 'ja-line') + '">· ' + esc(s) + '</div>';
+      }).join('') + '</div>';
+  }
+
   function scopeTitle() {
     var st = app.state;
     var u = D.byId(st.unit);
@@ -545,6 +738,8 @@
       '</div>' +
 
       feedbackCard() +
+
+      progressCard() +
 
       '<div class="card">' +
       '<h2 class="card-title">练哪个单元</h2>' +
@@ -730,6 +925,7 @@
         '<div class="card">' +
         '<h2 class="card-title">先设一个口令</h2>' +
         '<p class="card-note">孩子要是能自己进去点"全对"，这套就白做了。设个 4～6 位数字。</p>' +
+        '<p class="card-note">口令只存在这台设备上，所以换一台设备就要再设一次（可以和别的设备不一样）。</p>' +
         '<input id="passInput" class="pass-input" type="text" inputmode="numeric" ' +
         'placeholder="输入口令" value="' + esc(app.passInput) + '">' +
         '<div class="action-row"><button class="btn btn-primary" data-act="set-pass">设好，进去批改</button></div>' +
@@ -750,8 +946,9 @@
         '</div>';
     }
 
-    // 已解锁：逐条批改
-    var p = st.pending[0];
+    // 已解锁：逐条批改。队列里可能混着别的设备传上来的作业
+    var queue = gradingQueue();
+    var p = queue.length ? queue[0] : null;
     if (!p) {
       return '' +
         '<div class="topbar"><button class="btn-icon" data-act="home">←</button>' +
@@ -768,15 +965,30 @@
     var isPy = !isZ && (it.mode || 'py2word') !== 'word2py';
     var stemTxt = isZ ? ('给「' + esc(it.text) + '」组词') : (isPy ? esc(it.py) : esc(it.text));
     var ansTxt = isZ ? (it.zuci || []).join('、') : (isPy ? esc(it.text) : esc(it.py));
+
+    // 教案里对这个字的结构 / 笔顺 / 易错笔画说明。
+    // 只摆在家长这一侧：孩子写之前看到提示，练的就不是"能不能想起来"了。
+    var tips = tipsForItem(it);
+    var tipHtml = tips.length
+      ? '<div class="ja-block"><div class="ja-label">教案里对这个字的提示（批注可以直接照这个说）</div>' +
+        tips.map(function (t) {
+          return '<div class="ja-line"><b>' + esc(t.c) + '</b>　' + esc(t.tip) + '</div>';
+        }).join('') + '</div>'
+      : '';
     return '' +
       '<div class="topbar"><button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">家长批改</span>' +
-      '<span class="topbar-right">待批 ' + st.pending.length + ' 条</span></div>' +
+      '<span class="topbar-right">待批 ' + queue.length + ' 条</span></div>' +
+      (p.dev && F && p.dev !== (F.sync() && F.sync().dev)
+        ? '<div class="card card-quiet"><p class="card-note">这一条是「' +
+          esc(p.devName || '另一台设备') + '」上写的。</p></div>'
+        : '') +
 
       '<div class="card card-q">' +
       '<div class="stem"><span class="stem-label">题目</span>' + stemTxt + '</div>' +
       '<div class="write-wrap"><canvas id="reviewCanvas"></canvas></div>' +
       '<div class="answer-line">' + (isZ ? '参考答案（家长据此判断）：' : '正确答案：') + '<b>' + ansTxt + '</b></div>' +
+      tipHtml +
       '<input id="noteInput" class="note-input" type="text" placeholder="批注（可选）：比如「崩少了山字头」" ' +
       'value="' + esc(app.note) + '">' +
       '<div class="action-row">' +
@@ -826,6 +1038,69 @@
       }).join('');
     }
 
+    // 教案里的写字指导比"易错字：鼎（12 画）"具体得多：
+    // 会写明结构、笔顺、哪一笔容易写错，家长辅导时照着说就行。
+    function writingTipsSection() {
+      var scope = app.state.lesson;
+      var ids = (scope === 'all' ? u.lessons.map(function (l) { return l.no; }) : [scope]);
+      var tips = [];
+      ids.forEach(function (n) { tips = tips.concat(jiaoanTipsOf(u.id, n)); });
+      if (!tips.length) {
+        return '<p class="card-note">' +
+          (scope === 'all' ? '本单元教案里没有逐字的书写指导。' : '这一课的教案里没有逐字的书写指导。') +
+          '</p>';
+      }
+      return tips.map(function (t) {
+        return '<div class="ref-tricky"><b>' + esc(t.c) + '</b>　' + esc(t.tip) + '</div>';
+      }).join('');
+    }
+
+    // 教案给的东西：这一课到底要掌握什么、重点难点、老师布置的分层作业、板书。
+    // 全是"知道这一课在学什么"用的，不进练习、不进统计。
+    function jiaoanSection() {
+      if (!J) return '';
+      var ju = J.byId(u.id);
+      if (!ju) return '';
+      var scope = app.state.lesson;
+
+      if (scope === 'all') {
+        return '<div class="card"><h2 class="card-title">单元要点（教案）</h2>' +
+          '<p class="card-note">本单元的教学目标与重难点，知道这一单元要抓什么。</p>' +
+          listBlock('教学目标', ju.goals) +
+          listBlock('重点', ju.key) +
+          listBlock('难点', ju.hard) +
+          '</div>';
+      }
+
+      var ls = jiaoanLessons(u.id, scope);
+      if (!ls.length) return '';
+      var keys = [], hards = [], hw = [], board = [];
+      ls.forEach(function (l) {
+        if (l.key) keys.push(l.key);
+        if (l.hard) hards.push(l.hard);
+        hw = hw.concat(l.homework || []);
+        board = board.concat(l.board || []);
+      });
+      // 教学目标按课时分段列：一课两三节，四句"文化自信 / 语言运用……"
+      // 摞在一起会变成一堵墙，看不出哪节讲什么。
+      var goalBlocks = ls.map(function (l) {
+        return listBlock(ls.length > 1 ? (l.period || '教学目标') : '教学目标', l.goals || []);
+      }).join('');
+      var ln = null;
+      u.lessons.forEach(function (x) { if (String(x.no) === String(scope)) ln = x; });
+
+      return '<div class="card"><h2 class="card-title">本课重点（教案）' +
+        (ln ? '　' + esc(lessonLabel(ln) + '《' + ln.title + '》') : '') + '</h2>' +
+        '<p class="card-note">这一课课堂上的目标和重难点，以及老师布置的作业。' +
+        '共 ' + ls.length + ' 节课时。</p>' +
+        goalBlocks +
+        listBlock('重点', keys) +
+        listBlock('难点', hards) +
+        listBlock('作业', hw) +
+        listBlock('板书', board) +
+        '</div>';
+    }
+
     var unitBtns = D.UNITS.map(function (x) {
       return '<button class="unit-btn' + (app.state.unit === x.id ? ' on' : '') +
         '" data-act="unit" data-u="' + esc(x.id) + '">' + esc(x.name.split('　')[0]) + '</button>';
@@ -845,12 +1120,38 @@
       '<button class="btn btn-primary btn-block" data-act="start-zuci">开始练组词</button>' +
       '</div>' +
       '<div class="card"><h2 class="card-title">多音字</h2>' + polySection() + '</div>' +
-      '<div class="card"><h2 class="card-title">易错字提醒</h2>' + trickySection() + '</div>';
+      '<div class="card"><h2 class="card-title">易错字提醒</h2>' + trickySection() + '</div>' +
+      '<div class="card"><h2 class="card-title">写字要点（教案）</h2>' +
+      '<p class="card-note">教案里逐字写的结构、笔顺、易错笔画。练之前看一眼，' +
+      '批改的时候也照这个说。</p>' + writingTipsSection() + '</div>' +
+      jiaoanSection();
+  }
+
+  // 报告/统计要用的历史：本机 + 云端各设备（按"时间+词"去重）。
+  //
+  // 不合并的话，家长在自己手机上打开报告页会是空的 —— 那台设备一条练习记录都没有，
+  // 记录全在孩子那台设备上。跨设备看报告要成立，这一步是必须的。
+  function mergedHistory() {
+    var list = (app.state.history || []).slice();
+    if (!F || !F.on() || !app.cloudReports || !app.cloudReports.length) return list;
+    var myDev = F.sync().dev;
+    var seen = {};
+    list.forEach(function (h) { seen[h.ts + '|' + h.key] = 1; });
+    app.cloudReports.forEach(function (r) {
+      if (r.dev === myDev) return;   // 本机那份已经在上面算过了
+      ((r.snapshot && r.snapshot.history) || []).forEach(function (h) {
+        var k = h.ts + '|' + h.key;
+        if (seen[k]) return;
+        seen[k] = 1;
+        list.push(h);
+      });
+    });
+    return list.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
   }
 
   function reviewStatsHtml() {
     var st = app.state;
-    var hist = st.history || [];
+    var hist = mergedHistory();
     var done = hist.length;
     if (!done) return '';
     var ok = hist.filter(function (h) { return h.isCorrect; }).length;
@@ -877,8 +1178,66 @@
     w: '看拼音写词语', c: '看拼音写生字', z: '组词', p: '多音字选读音', r: '默写'
   };
 
+  // 跨设备同步的开关（只在家长报告页里，孩子碰不到）
+  function syncCardHtml() {
+    if (!F) return '';
+    var s = F.sync();
+    if (!s.on) {
+      return '<div class="card">' +
+        '<h2 class="card-title">跨设备同步</h2>' +
+        '<p class="card-note">开了之后：孩子在平板上写的字，你在自己手机上就能批；' +
+        '批完的结果自动回到孩子那台设备。不用点同步，也不用在同一台设备上。</p>' +
+        '<div class="action-row">' +
+        '<button class="btn btn-primary" data-act="sync-on">生成一个家庭码</button>' +
+        '</div>' +
+        '<p class="card-note">另一台设备已经生成过的话，直接把那个码填进来：</p>' +
+        '<input id="famInput" class="pass-input" type="text" placeholder="xxxx-xxxx-xxxx" ' +
+        'autocomplete="off" value="' + esc(app.famInput || '') + '">' +
+        '<div class="action-row">' +
+        '<button class="btn btn-soft" data-act="sync-join">用这个码</button>' +
+        '</div>' +
+        (app.cloudMsg ? '<div class="feedback warn">' + esc(app.cloudMsg) + '</div>' : '') +
+        '</div>';
+    }
+    return '<div class="card">' +
+      '<h2 class="card-title">跨设备同步</h2>' +
+      '<div class="cta-line">家庭码　<b>' + esc(s.fam) + '</b></div>' +
+      '<p class="card-note">另一台设备在同一个地方填上这个码就对上了。' +
+      '知道这个码的人能看报告、也能批改 —— 别发给外人。</p>' +
+      '<p class="card-note">' + esc(F.statusText()) + '</p>' +
+      '<div class="action-row">' +
+      '<button class="btn btn-ghost" data-act="sync-new">换一个码</button>' +
+      '<button class="btn btn-soft" data-act="sync-off">关掉同步</button>' +
+      '</div>' +
+      '</div>';
+  }
+
+  // 别的设备上练得怎么样（统计快照，覆盖写，云端只留最新一份）
+  function cloudReportsHtml() {
+    if (!F || !F.on() || !app.cloudReports || !app.cloudReports.length) return '';
+    var myDev = F.sync().dev;
+    var rows = app.cloudReports.filter(function (r) { return r.dev !== myDev; });
+    if (!rows.length) return '';
+
+    var list = rows.map(function (r) {
+      var h = (r.snapshot && r.snapshot.history) || [];
+      var ok = h.filter(function (x) { return x.isCorrect; }).length;
+      var pct = h.length ? Math.round(ok / h.length * 100) : 0;
+      var when = r.ts ? new Date(r.ts).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      return '<li><b>' + esc((r.snapshot && r.snapshot.devName) || '另一台设备') + '</b>　' +
+        h.length + ' 条，写对 ' + ok + ' 条（' + pct + '%）' +
+        (when ? '　<span class="dim">' + esc(when) + '</span>' : '') + '</li>';
+    }).join('');
+
+    return '<div class="card card-quiet">' +
+      '<h2 class="card-title">别的设备上</h2>' +
+      '<p class="card-note">下面是另 ' + rows.length + ' 台设备最近一次上传的情况（本机在上面）。</p>' +
+      '<ul class="tag-list">' + list + '</ul>' +
+      '</div>';
+  }
+
   function reportBodyHtml() {
-    var hist = app.state.history || [];
+    var hist = mergedHistory();
     if (!hist.length) {
       return '<div class="card"><h2 class="card-title">练习报告</h2>' +
         '<p class="card-note">还没有做题记录。练过一次之后，这里会按题型和单元分开统计。</p></div>';
@@ -945,7 +1304,46 @@
       '<div class="topbar">' +
       '<button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">练习报告</span><span class="topbar-right"></span></div>' +
-      reportBodyHtml();
+      reportBodyHtml() +
+      cloudReportsHtml() +
+      syncCardHtml();
+  }
+
+  // 统计快照：覆盖写，云端只留每台设备的最新一份。
+  // 全量历史就在孩子设备上（history 上限 2000 条），没必要再往云端堆一份。
+  function reportSnapshot() {
+    return {
+      devName: (F && F.sync() && F.sync().name) || '设备',
+      ts: Date.now(),
+      history: (app.state.history || []).slice(-200),
+      stats: app.state.stats || {}
+    };
+  }
+
+  // 打开页面 / 从后台切回时取一次"家长在别处批的结果"。
+  // 刻意不做定时轮询 —— 平时完全不联网，不耗电也不跑流量。
+  function refreshGrades() {
+    if (!F || !F.on()) return;
+    F.pullGrades(app.acked || []).then(function () {
+      app.acked = [];   // 回执送到了，云端已经把这几条删掉
+    }).catch(function () { /* 连不上就算了，下次再试 */ });
+  }
+
+  // 进家长批改页时拉一次别的设备传上来的作业（笔迹只放内存，不落本地存储）
+  function refreshCloudWork() {
+    if (!F || !F.on()) return;
+    F.pullWork().then(function (items) {
+      app.cloudWork = items || [];
+      if (app.view === 'parent') render();
+    }).catch(function () { /* 失败就只批本机的，不打断家长 */ });
+  }
+
+  function refreshReports() {
+    if (!F || !F.on()) return;
+    F.pullReports().then(function (list) {
+      app.cloudReports = list || [];
+      if (app.view === 'report') render();
+    }).catch(function () {});
   }
 
   /* ============================== 动作 ============================== */
@@ -1073,6 +1471,17 @@
     render();
   }
 
+  // 只留 cell + 归一化坐标。downPos / moved / holdTimer 只在画的时候有用，
+  // 存下来既没用又占地方，还要跟着上传。
+  function cleanStrokes(list) {
+    return (list || []).map(function (s) {
+      return {
+        cell: typeof s.cell === 'number' ? s.cell : -1,
+        pts: (s.pts || []).slice()
+      };
+    });
+  }
+
   function submitWriting() {
     if (!app.strokes.length) {
       app.message = '先在田字格里写一下。';
@@ -1096,16 +1505,23 @@
         unit: app.state.unit,
         no: it.no
       },
-      strokes: JSON.parse(JSON.stringify(app.strokes))
+      strokes: cleanStrokes(app.strokes)
     });
     saveState();
 
     app.strokes = [];
     app.cursor++;
     app.message = '';
+    if (F && F.on()) F.markWorkDirty();
+
     if (app.cursor >= app.session.length) {
       app.view = 'home';
       app.session = null;
+      // 整轮写完才传：中途传上去家长也来不及批，白白多几次请求
+      if (F && F.on()) {
+        F.flushWork();
+        F.pushReport(reportSnapshot());
+      }
     }
     render();
   }
@@ -1147,27 +1563,88 @@
     }
   }
 
-  function gradeCurrent(isCorrect) {
-    var p = app.state.pending[0];
-    if (!p) return;
-    recordResult(p.item, isCorrect, app.note);
+  // 家长要批的：本机写完的 + 别的设备传上来的，合成一条队，先写的先批。
+  // 云端那些只在内存里（app.cloudWork），不落本地存储 —— 别的设备写的字
+  // 没必要长期占着这台设备的空间。
+  function gradingQueue() {
+    var dev = (F && F.sync() && F.sync().dev) || '';
+    var mine = (app.state.pending || []).map(function (p) {
+      return { id: p.id, ts: p.ts, item: p.item, strokes: p.strokes, dev: dev };
+    });
+    var cloud = (app.cloudWork || []).filter(function (c) {
+      for (var i = 0; i < mine.length; i++) if (mine[i].id === c.id) return false;
+      return true;
+    });
+    return mine.concat(cloud).sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+  }
+
+  function queueHead() {
+    var q = gradingQueue();
+    return q.length ? q[0] : null;
+  }
+
+  // 一条作答落地：更新掌握度、排复习、记历史、把结果摆给孩子看。
+  // 本地批和"家长在别的设备上批完传回来"走的是同一条路 —— 规则分叉就会出现
+  // "错一次"在两种题型/两种来源里含义不同，复习排期立刻乱掉。
+  function applyResult(p, isCorrect, note) {
+    recordResult(p.item, isCorrect, note);
 
     // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
     // 家长那句批注也就失去了上下文。
     app.state.feedback.push({
       ts: Date.now(), key: keyOf(p.item), text: p.item.text, py: p.item.py,
-      isCorrect: !!isCorrect, note: app.note || ''
+      isCorrect: !!isCorrect, note: note || ''
     });
     // 家长连着批几十条时，这一堆"还没给孩子看"的也会一直涨。
     // 孩子一次看得过来的就最近那些，留个上限就够了（history 那边同理）。
     if (app.state.feedback.length > 60) {
       app.state.feedback = app.state.feedback.slice(-60);
     }
+    app.state.pending = app.state.pending.filter(function (x) { return x.id !== p.id; });
+  }
 
-    app.state.pending.shift();
+  // 孩子端收到"家长在别处批的结果"。认不出来（已经批过 / 清掉了）就跳过 ——
+  // 说明这条在别处已经生效，不能把掌握度再算一遍。
+  function applyRemoteGrades(list) {
+    var acked = [];
+    (list || []).forEach(function (g) {
+      var p = null;
+      for (var i = 0; i < app.state.pending.length; i++) {
+        if (app.state.pending[i].id === g.id) { p = app.state.pending[i]; break; }
+      }
+      if (!p) return;
+      applyResult(p, g.ok, g.note);
+      acked.push(g.id);
+    });
+    if (acked.length) { saveState(); render(); }
+    return acked;
+  }
+
+  function gradeCurrent(isCorrect) {
+    var p = queueHead();
+    if (!p) return;
+    var note = app.note || '';
+    var mine = !p.dev || !F || p.dev === (F.sync() && F.sync().dev);
+
+    // 不管在哪批的，都生成一条批改结果。攒到这一批改完再一起传
+    // （幂等由服务端保证：先到为准），所以"本机批"和"跨设备批"只有一套代码。
+    if (F && F.on()) {
+      F.queueGrade({ dev: mine ? F.sync().dev : p.dev, id: p.id, ok: !!isCorrect, note: note });
+    }
+
+    if (mine) {
+      applyResult(p, isCorrect, note);
+    } else {
+      // 别的设备上写的字：复习排期在那台设备上算，这台只把队列划掉
+      app.cloudWork = (app.cloudWork || []).filter(function (x) { return x.id !== p.id; });
+    }
+
     app.note = '';
     saveState();
     render();
+
+    // 这一批批完了 → 一起传上去（批得很快，没必要一条一传）
+    if (F && F.on() && !queueHead()) F.flushGrades();
   }
 
   /* ============================== 渲染与事件 ============================== */
@@ -1211,6 +1688,9 @@
               : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' +
       (app.storageWarn ? '<div class="card card-warn">' + esc(app.storageWarn) + '</div>' : '') +
+      // 同步相关的提示（比如"这条别人已经批过了"）放在最上面 ——
+      // 批完最后一条之后队列就空了，挂在批改卡片上反而看不见。
+      (app.cloudMsg ? '<div class="card card-warn"><p class="card-note">' + esc(app.cloudMsg) + '</p></div>' : '') +
       html + '</div>';
 
     // 打字/选择题没有画布，setupCanvas 要跳过 —— 否则会拿到 null 报错
@@ -1224,13 +1704,16 @@
       var zCols = isZ && it ? it.perRow : 0;
       setupCanvas(el('writeCanvas'), nCells, app.strokes, true, grid, zCols);
     }
-    if (app.view === 'parent' && app.parentUnlocked && app.state.pending.length) {
-      var p0 = app.state.pending[0];
-      var pIsZ = p0.item.kind === 'z';
-      var pGrid = pIsZ ? 'tian' : (((p0.item.mode || 'py2word') === 'word2py') ? 'pinyin' : 'tian');
-      var pN = pIsZ ? (p0.item.cells || 8) : p0.item.text.length;
-      var pCols = pIsZ ? (p0.item.perRow || 4) : 0;
-      setupCanvas(el('reviewCanvas'), pN, p0.strokes, false, pGrid, pCols);
+    if (app.view === 'parent' && app.parentUnlocked) {
+      var p0 = queueHead();
+      if (p0) {
+        var pIsZ = p0.item.kind === 'z';
+        var pGrid = pIsZ ? 'tian' : (((p0.item.mode || 'py2word') === 'word2py') ? 'pinyin' : 'tian');
+        var pN = pIsZ ? (p0.item.cells || 8) : p0.item.text.length;
+        var pCols = pIsZ ? (p0.item.perRow || 4) : 0;
+        // 笔迹是按格子存的，所以在这台设备（屏宽可能不一样）上回放仍然对得上格子
+        setupCanvas(el('reviewCanvas'), pN, p0.strokes, false, pGrid, pCols);
+      }
     }
     // 只在"换了页面"或"做到下一题"时才回到顶部。
     //
@@ -1263,6 +1746,13 @@
       saveState();
       return render();
     }
+    // 「本周课堂」里点某一课：直接把单元和课时切过去，省得先找单元再找课
+    if (act === 'goto-lesson') {
+      app.state.unit = t.getAttribute('data-u') || app.state.unit;
+      app.state.lesson = t.getAttribute('data-l') || 'all';
+      saveState();
+      return render();
+    }
     if (act === 'ack-feedback') {
       app.state.feedback = [];
       saveState();
@@ -1280,10 +1770,18 @@
     }
     if (act === 'submit-typed') return submitTyped(false);
     if (act === 'give-up') return submitTyped(true);
-    if (act === 'home') { app.view = 'home'; app.session = null; return render(); }
+    if (act === 'home') {
+      // 离开批改页时把攒下的批改结果一起传走（不管批没批完）
+      if (F && F.on()) F.flushGrades();
+      app.view = 'home';
+      app.session = null;
+      return render();
+    }
     if (act === 'quit') {
       app.view = 'home';
       app.session = null;
+      // 中途退出也把已经写的传上去 —— 不然孩子写到一半走了，家长那边一条都看不到
+      if (F && F.on()) F.flushWork();
       return render();
     }
     if (act === 'clear') { app.strokes = []; app.message = ''; return render(); }
@@ -1299,12 +1797,16 @@
         return render();
       }
       app.view = 'report';
+      refreshReports();     // 别的设备练得怎么样
+      refreshGrades();      // 顺带看看有没有家长在别处批的结果
       return render();
     }
     if (act === 'parent') {
       app.view = 'parent';
       app.passInput = '';
       app.message = '';
+      app.cloudMsg = '';   // 上次那句"别人批过了"不用再挂着
+      refreshCloudWork();   // 别的设备写完的字，也会出现在这条队列里
       return render();
     }
     if (act === 'set-pass') {
@@ -1316,6 +1818,7 @@
       app.state.passcode = v;
       app.parentUnlocked = true;
       saveState();
+      refreshCloudWork();
       return render();
     }
     if (act === 'unlock') {
@@ -1324,10 +1827,41 @@
         return render();
       }
       app.parentUnlocked = true;
+      refreshCloudWork();
       return render();
     }
     if (act === 'grade-ok') return gradeCurrent(true);
     if (act === 'grade-bad') return gradeCurrent(false);
+
+    /* ---- 跨设备同步（只在家长报告页里能点到） ---- */
+    if (act === 'sync-on' || act === 'sync-new') {
+      if (!F) return;
+      // enable 自己会校验格式，返回"到底开没开"
+      app.cloudMsg = F.enable(F.newCode()) ? '' : '没能开启同步，再点一次试试。';
+      saveState();
+      return render();
+    }
+    if (act === 'sync-join') {
+      if (!F) return;
+      var code = String(app.famInput || '').trim().toLowerCase();
+      if (!F.enable(code)) {
+        app.cloudMsg = '家庭码是 12 位，形如 xxxx-xxxx-xxxx（字母和数字，中间两道横杠）。';
+        return render();
+      }
+      app.famInput = '';
+      app.cloudMsg = '';
+      saveState();
+      refreshCloudWork();
+      return render();
+    }
+    if (act === 'sync-off') {
+      if (!F) return;
+      F.disable();
+      app.cloudWork = [];
+      app.cloudReports = [];
+      saveState();
+      return render();
+    }
   }
 
   function onInput(e) {
@@ -1335,6 +1869,7 @@
     if (!t) return;
     if (t.id === 'passInput') app.passInput = t.value;
     if (t.id === 'noteInput') app.note = t.value;
+    if (t.id === 'famInput') app.famInput = t.value;
     // 只记下来，不 render —— render 会整块换掉 innerHTML，输入框会失焦
     if (t.id === 'typedInput') app.typed = t.value;
   }
@@ -1356,7 +1891,58 @@
       window.visualViewport.addEventListener('resize', refitCanvas);
     }
 
+    if (F) {
+      F.init(app.state, {
+        applyGrades: function (list) {
+          // 家长在别处批的结果：应用到本地，并记下回执（下次联网时让云端删掉）
+          var acked = applyRemoteGrades(list);
+          if (acked.length) app.acked = (app.acked || []).concat(acked);
+        },
+        onStatus: function () { if (app.view === 'report') render(); },
+        // 两个家长同时批的时候会撞车：服务端保证"先到为准"，
+        // 这里把撞上的条数说一句，顺便把队列刷新成最新的。
+        onGraded: function (data) {
+          if (data && data.dup > 0) {
+            app.cloudMsg = '有 ' + data.dup + ' 条已经被另一台设备批过了（先批的为准），队列已刷新。';
+            refreshCloudWork();
+          }
+        }
+      });
+    }
+
+    // 从后台切回前台时取一次结果；切走时把攒下的批改结果发出去。
+    // 平时不联网，也不做定时轮询。
+    if (typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          refreshGrades();
+          // 上次没传成功的作业，回到前台补一次（刻意不做定时器，也不轮询）
+          if (F && F.on() && F.isDirty()) F.flushWork();
+        } else if (F && F.on()) {
+          F.flushGrades();
+        }
+      });
+    }
+
     render();
+    refreshGrades();
+    // 上次没传成功的（断网、关得太快、批完直接关页面），这次开机补上
+    if (F && F.on() && F.isDirty()) F.flushWork();
+    if (F && F.on() && F.pendingGrades()) F.flushGrades();
+  }
+
+  // 给测试挂的钩子：浏览器里它就是个没人理的对象，不影响任何行为。
+  // 挂出来的都是"跨设备同步"这条链上必须钉住的函数 —— 尤其是笔迹的归一化：
+  // 平板写的字要在手机上回放，还原错了家长看到的就不是孩子写的那个字。
+  if (typeof window !== 'undefined') {
+    window.__cc = {
+      app: app,
+      cellLayout: cellLayout,
+      pointXY: pointXY,
+      gradingQueue: gradingQueue,
+      applyRemoteGrades: applyRemoteGrades,
+      reportSnapshot: reportSnapshot
+    };
   }
 
   if (document.readyState === 'loading') {
