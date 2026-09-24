@@ -41,6 +41,9 @@
     strokes: [],
     parentUnlocked: false,
     passInput: '',
+    // 从首页点「跨设备同步」进来时，先过口令这道门；过了之后直接去同步页，
+    // 不用家长再自己找一遍。见 onClick 的 'sync' 和 viewSync()。
+    afterUnlock: '',
     note: '',
     // 别的设备传上来等批改的作业（只在内存里，不落本地存储）
     cloudWork: [],
@@ -242,25 +245,40 @@
   // 格子怎么排：四个字并排会窄得没法写，所以
   //   1~3 个字 → 一行；4 个字 → 2×2；5 个字以上 → 每行 3 个，往下折行。
   // forceCols：指定每行格数（组词要"一行一个词"，每行固定 4 格）
-  function cellLayout(n, W, type, forceCols) {
-    var cols = forceCols || (n <= 3 ? n : (n === 4 ? 2 : 3));
+  // vertical：一列往下排（练习页用），格子靠右摆。
+  function cellLayout(n, W, type, forceCols, vertical) {
+    var cols = forceCols || (vertical ? 1 : (n <= 3 ? n : (n === 4 ? 2 : 3)));
     var rows = Math.ceil(n / cols);
     var pad = 10, gap = 8;
     var avail = (W - pad * 2 - gap * (cols - 1)) / cols;
     var w, h;
     if (type === 'pinyin') {
       // 拼音格更宽：一个音节占一格，大约 1.9:1
-      h = Math.round(Math.min(64, Math.max(46, avail / 1.9)));
+      h = Math.round(Math.min(vertical ? 76 : 64, Math.max(46, avail / 1.9)));
       w = Math.min(avail, Math.round(h * 1.9));
     } else {
-      var side = Math.floor(Math.min(avail, 118));
+      // 竖排一列的时候横向没有别人抢地方，格子能放大就放大（写起来更稳），
+      // 但字一多就收一点，免得整页太长、写一个字就要滑一次屏。
+      var cap = vertical ? (n >= 7 ? 96 : (n >= 5 ? 120 : 150)) : 118;
+      if (vertical && typeof window !== 'undefined' && window.innerHeight) {
+        // 竖排会变成一长条。格子还按 150 排的话，一屏只够看三格，
+        // 剩下的得滑屏才够得着 —— 而画布上是 touch-action:none（不然写字会被
+        // 滚动打断），在画布上根本滑不动。按屏幕高度收一收，尽量一屏写完；
+        // 下限 72 是保证格子还写得开的底线。
+        var room = window.innerHeight * 0.62 - pad * 2 - (n - 1) * gap;
+        cap = Math.max(72, Math.min(cap, Math.floor(room / n)));
+      }
+      var side = Math.floor(Math.min(avail, cap));
       w = h = Math.max(side, 46);
     }
-    return { cols: cols, rows: rows, pad: pad, gap: gap, w: w, h: h, type: type || 'tian' };
+    return {
+      cols: cols, rows: rows, pad: pad, gap: gap, w: w, h: h,
+      type: type || 'tian', vertical: !!vertical
+    };
   }
 
-  function drawCells(ctx, n, W, type, forceCols) {
-    var L = cellLayout(n, W, type, forceCols);
+  function drawCells(ctx, n, W, type, forceCols, vertical) {
+    var L = cellLayout(n, W, type, forceCols, vertical);
     for (var i = 0; i < n; i++) {
       var c = i % L.cols, r = Math.floor(i / L.cols);
       var x = L.pad + c * (L.w + L.gap);
@@ -324,11 +342,30 @@
     return { x: pt.u * (geo.W || 1), y: pt.v * (geo.H || 1) };
   }
 
-  function drawStrokes(ctx, strokes, geo) {
-    ctx.strokeStyle = '#e8590c';
-    ctx.lineWidth = 3;
+  var INK = '#e8590c';
+  var INK_W = 3;
+
+  // 笔画的线型只在这里设一次：整条重画和"只补一小段"必须长得一模一样，
+  // 不然孩子写出来的笔画会一段粗一段细。
+  function inkBegin(ctx) {
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = INK_W;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    ctx.beginPath();
+  }
+
+  // 落笔的那一下。写 i、j 的"点"本身就是一次极短的落笔，
+  // 不给它画一个点的话，那个点写完就看不见了。
+  function drawDot(ctx, p) {
+    inkBegin(ctx);
+    ctx.arc(p.x, p.y, INK_W / 2, 0, Math.PI * 2);
+    ctx.fillStyle = INK;
+    ctx.fill();
+  }
+
+  function drawStrokes(ctx, strokes, geo) {
+    inkBegin(ctx);
     (strokes || []).forEach(function (st) {
       // 兼容两种格式：新格式 {cell, pts:[{u,v}]}，旧格式（历史笔迹）直接是点数组
       var pts = st && st.pts ? st.pts : st;
@@ -345,8 +382,24 @@
     });
   }
 
+  // 画布的位置每帧只量一次。一次 pointermove 里有十几个采样点时，
+  // 每个点都量一次会触发布局重算（低配平板上就是这样卡起来的），
+  // 卡一次浏览器就丢一批采样 —— 孩子写出来的笔画跟着断。
+  // 16 毫秒内复用同一个位置：滚动中的偏差不超过一帧的滚动量，看不出来。
+  var rectCv = null, rectCache = null, rectAt = 0;
+  function rectOf(cv) {
+    var now = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now() : Date.now();
+    if (rectCv !== cv || !rectCache || now - rectAt > 16) {
+      rectCache = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+      rectCv = cv;
+      rectAt = now;
+    }
+    return rectCache;
+  }
+
   function posOf(cv, e) {
-    var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+    var r = rectOf(cv);
     // 取整：笔迹是一笔一笔存进 localStorage 的，小数点能省掉三分之一的体积
     return {
       x: Math.round(e.clientX - r.left),
@@ -354,38 +407,65 @@
     };
   }
 
+  // 一次 pointermove 里浏览器可能攒了好几个采样点（电容笔尤其明显）。
+  // 只取最后一个的话，快写时笔画会变成几段直棱棱的折线 ——
+  // 孩子写"一"写不直、写"撇"变成折线，看着就像"连着写会断笔"。
+  function coalesced(e) {
+    if (typeof e.getCoalescedEvents === 'function') {
+      try {
+        var list = e.getCoalescedEvents();
+        if (list && list.length) return list;
+      } catch (err) { /* 老浏览器：退回这一个点，照常能写 */ }
+    }
+    return [e];
+  }
+
   // 每次渲染后都要重来一遍：画布是新的，尺寸也可能变了
   // gridType: 'tian' 田字格（写汉字）；'pinyin' 四线三格（写拼音）
   // forceCols: 每行固定几格（组词用，0/省略则自动排）
+  // vertical: 一列往下排（练习页用）。格子靠右摆，左边空出来给手掌。
   //
   // 转屏之后格子会变多变少，所以尺寸和格位放在 cv._ccGeo 这个可变的盒子里，
   // 事件只绑一次（cv._ccBound）并随时从盒子里读最新的格位 ——
   // 要是 resize 时再绑一遍，一次落笔就会被当成两笔，家长看到的全是重影。
   var lastCanvas = null;
 
-  function setupCanvas(cv, n, strokes, editable, gridType, forceCols, retry) {
+  function setupCanvas(cv, n, strokes, editable, gridType, forceCols, vertical, retry) {
     if (!cv || typeof cv.getContext !== 'function') return;
     var host = cv.parentNode;
     if (!host) return;
-    var W = host.clientWidth;
+    // clientWidth 含容器的内边距，而画布只能占内容区那么宽 ——
+    // 把内边距算成可用宽度的话，画布会宽出一点点、被 max-width 压回来，
+    // 那就成了整块缩放：位图里的笔迹和屏幕上的格子会错开。
+    var padX = 0;
+    if (typeof getComputedStyle === 'function') {
+      var cs = getComputedStyle(host);
+      padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    }
+    var W = Math.max(0, host.clientWidth - padX);
     if (!W) {
       // 布局还没定（刚插入 DOM）。这时候放手，画笔整个是死的：
       // 孩子点了没反应，也不知道为什么 —— 等一帧再量一次（只再试一次，
       // 容器一直是 0 宽的说明这一屏根本没有画布，别把 rAF 转成死循环）。
       if (!retry && typeof requestAnimationFrame === 'function') {
         requestAnimationFrame(function () {
-          setupCanvas(cv, n, strokes, editable, gridType, forceCols, true);
+          setupCanvas(cv, n, strokes, editable, gridType, forceCols, vertical, true);
         });
       }
       return;
     }
     // 高度由格子算出来：折行之后要跟着变高，不然下面的格子会被切掉
-    var L = cellLayout(n, W, gridType || 'tian', forceCols);
+    var L = cellLayout(n, W, gridType || 'tian', forceCols, vertical);
+    // 画布只做"格子实际占的那一块"，不再铺满整行：竖排时就是右边那么一列。
+    // 右边空出来的地方全是留给手掌的 —— 手掌蹭在那儿根本落不到画布上，
+    // 也就画不出痕迹（孩子写字时手掌就压在格子旁边的空白处）。
+    var CW = L.pad * 2 + L.cols * L.w + (L.cols - 1) * L.gap;
     var H = L.pad * 2 + L.rows * L.h + (L.rows - 1) * L.gap;
 
+    cv.style.width = CW + 'px';
     cv.style.height = H + 'px';
     var dpr = window.devicePixelRatio || 1;
-    cv.width = Math.round(W * dpr);
+    cv.width = Math.round(CW * dpr);
     cv.height = Math.round(H * dpr);
 
     var ctx = cv.getContext('2d');
@@ -396,17 +476,21 @@
     if (!geo) geo = cv._ccGeo = {};
     geo.n = n;
     geo.L = L;
-    geo.W = W;
+    geo.W = CW;
     geo.H = H;
     geo.ctx = ctx;
     geo.grid = gridType || 'tian';
     geo.cols = forceCols;
+    geo.vertical = vertical;
     geo.list = strokes || app.strokes;
-    lastCanvas = { cv: cv, n: n, strokes: strokes, editable: editable, gridType: gridType, forceCols: forceCols };
+    lastCanvas = {
+      cv: cv, n: n, strokes: strokes, editable: editable,
+      gridType: gridType, forceCols: forceCols, vertical: vertical
+    };
 
     function redraw() {
-      ctx.clearRect(0, 0, W, H);
-      drawCells(ctx, n, W, geo.grid, forceCols);
+      ctx.clearRect(0, 0, CW, H);
+      drawCells(ctx, n, CW, geo.grid, forceCols, vertical);
       drawStrokes(ctx, geo.list, geo);
     }
     geo.redraw = redraw;
@@ -432,23 +516,36 @@
       }
     }
 
-    // 落笔的位置记成"第几个格子 + 格内相对位置"，不记像素
-    function normOf(p) {
+    // 落笔的位置记成"第几个格子 + 格内相对位置"，不记像素。
+    //
+    // 整笔只用**起笔那一格**当基准（anchor），中途笔尖经过别的格子、扫到格外
+    // 也不换参照系。以前是每个点各自找自己落在哪个格子里，回放时却按笔画起点
+    // 的格子还原 —— 两套坐标系对不上，笔尖一越过格线就跳一个格宽，
+    // 画出来是一条横穿格子的直线（孩子说的"写到格子那儿自动弹回来一条线"）。
+    // 现在超出格子的部分就老老实实画在格子外面，和手写一样。
+    function normAt(p, anchor) {
       var lay = geo.L;
-      var c = cellAt(p);
-      if (c >= 0 && lay && lay.w > 0 && lay.h > 0) {
-        var col = c % lay.cols, row = Math.floor(c / lay.cols);
+      if (anchor >= 0 && lay && lay.w > 0 && lay.h > 0) {
+        var col = anchor % lay.cols, row = Math.floor(anchor / lay.cols);
         var x = lay.pad + col * (lay.w + lay.gap);
         var y = lay.pad + row * (lay.h + lay.gap);
-        return { cell: c, u: (p.x - x) / lay.w, v: (p.y - y) / lay.h };
+        return { u: (p.x - x) / lay.w, v: (p.y - y) / lay.h };
       }
-      return { cell: -1, u: p.x / (W || 1), v: p.y / (H || 1) };
+      return { u: p.x / (CW || 1), v: p.y / (H || 1) };
     }
 
     // 每根手指各记各的一笔。以前全页共用一个"正在画"开关和一条折线，
     // 两根手指同时写（手掌蹭到屏、换手时没抬起来）会把两笔连成一条线，
     // 家长看到的就是一个从来没写过的怪符号。
     var live = {};
+    // 电容笔最近一次落下 / 抬起的时间。电容笔在写的时候，手掌往往就贴在
+    // 屏幕边上，浏览器把这种大接触面也报成一个触摸点 —— 不管它的话，
+    // 孩子写的字上会多出一条掌痕。笔在写、或刚抬起的一瞬间，触摸就当手掌忽略。
+    var penAt = 0;
+    function penLive() {
+      for (var k in live) { if (live[k] && live[k].pen) return true; }
+      return false;
+    }
 
     if (cv._ccBound) return;   // 事件已经绑好了，上面的 geo 一换就接着画
     cv._ccBound = true;
@@ -462,16 +559,27 @@
     }
 
     cv.addEventListener('pointerdown', function (e) {
+      // 电容笔正在写、或刚抬起的那一下：这时的触摸基本都是手掌跟手指，
+      // 让它也起一笔的话，孩子刚写的字上就糊一条痕。
+      var isPen = e.pointerType === 'pen';
+      if (isPen) penAt = Date.now();
+      else if (penLive() || (penAt && Date.now() - penAt < 400)) return;
       if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) {} }
       var p = posOf(cv, e);
       // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"
-      var np = normOf(p);
-      var s = { cell: np.cell, pts: [np], downPos: p, moved: false, holdTimer: null, norm: true };
+      var anchor = cellAt(p);
+      var s = {
+        cell: anchor, pts: [normAt(p, anchor)], downPos: p,
+        moved: false, holdTimer: null, norm: true, pen: isPen
+      };
       geo.list.push(s);
       live[e.pointerId] = s;
-      // 长按（按住不动约 0.55 秒）= 清空该格，单独重写这一个字。
+      drawDot(ctx, p);
+      // 长按（按住不动约 0.7 秒）= 清空该格，单独重写这一个字。
       // 不能再用"轻点"：写拼音时 i、j、ü 的"点"本身就是一次极短的落笔，
       // 轻点会被误判成清空，把刚写好的字母一起抹掉。长按写字时不会发生，就区分开了。
+      // 时间放宽到 0.7 秒、位移容差放到 6 像素：起笔时手一抖就会被当成"没动"，
+      // 那样孩子刚写的那个字会被整格抹掉。
       s.holdTimer = setTimeout(function () {
         s.holdTimer = null;
         if (s.moved) return;
@@ -479,20 +587,33 @@
         dropStroke(s);          // 这次长按本身不算一笔字
         if (s.cell >= 0) clearCell(s.cell);
         geo.redraw();
-      }, 550);
-      geo.redraw();
+      }, 700);
       e.preventDefault();
     });
     cv.addEventListener('pointermove', function (e) {
       var s = live[e.pointerId];
       if (!s || s.dead) return;
-      var p = posOf(cv, e);
-      if (Math.abs(p.x - s.downPos.x) > 4 || Math.abs(p.y - s.downPos.y) > 4) {
-        s.moved = true;
-        stopHold(s); // 已经动笔，就不再算"长按清空"
+      // 这一批采样点只补画新增的那一小段，不整块重画：
+      // 整块重画在低配平板上每动一下就卡一次，卡的时候浏览器丢采样，
+      // 写出来的笔画就是一段一段断的。
+      var evts = coalesced(e);
+      var from = pointXY(s.pts[s.pts.length - 1], s, geo);
+      inkBegin(ctx);
+      ctx.moveTo(from.x, from.y);
+      var grew = false;
+      for (var i = 0; i < evts.length; i++) {
+        var p = posOf(cv, evts[i]);
+        if (!s.moved && (Math.abs(p.x - s.downPos.x) > 6 || Math.abs(p.y - s.downPos.y) > 6)) {
+          s.moved = true;
+          stopHold(s); // 已经动笔，就不再算"长按清空"
+        }
+        var np = normAt(p, s.cell);
+        s.pts.push(np);
+        var px = pointXY(np, s, geo);
+        ctx.lineTo(px.x, px.y);
+        grew = true;
       }
-      s.pts.push(normOf(p));
-      geo.redraw();
+      if (grew) ctx.stroke();
       e.preventDefault();
     });
     function endStroke(e) {
@@ -500,11 +621,19 @@
       if (!s) return;
       stopHold(s);
       delete live[e.pointerId];
+      if (e.pointerType === 'pen') penAt = Date.now();
       if (s.dead) return;
-      // 在格子外点了一下（不是写字）：不留痕迹
-      if (s.pts.length === 1 && s.cell < 0) dropStroke(s);
+      // 在格子外点了一下（不是写字）：不留痕迹。
+      // 起点是刚落笔时补画上去的，得重画一遍才抹得掉。
+      if (s.pts.length === 1 && s.cell < 0) {
+        dropStroke(s);
+        geo.redraw();
+      }
     }
-    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
+    // 不用 pointerleave：笔尖滑到画布边缘外（画布现在只有一列那么宽，
+    // 很容易碰到）就被判成"这一笔写完了"，孩子接着写就从那儿断开。
+    // 已经 setPointerCapture 了，出了画布 pointermove / pointerup 照样送到这里。
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (t) {
       cv.addEventListener(t, endStroke);
     });
   }
@@ -516,7 +645,9 @@
     if (!c || !c.cv) return;
     // 页面早就换掉了：lastCanvas 指向的是一个已经离开 DOM 的节点
     if (el(c.cv.id) !== c.cv) return;
-    setupCanvas(c.cv, c.n, c.editable ? null : c.strokes, c.editable, c.gridType, c.forceCols);
+    rectCv = null;   // 尺寸变了，缓存的画布位置也得重量
+    setupCanvas(c.cv, c.n, c.editable ? null : c.strokes, c.editable,
+      c.gridType, c.forceCols, c.vertical);
   }
 
   /* ============================== 视图：首页 ============================== */
@@ -791,6 +922,9 @@
       '<button class="btn btn-ghost btn-block" data-act="parent">家长批改' +
       (pending ? '（' + pending + ' 条待批）' : '') + '</button>' +
       '<button class="btn btn-ghost btn-block" data-act="report">练习报告（家长 · 需口令）</button>' +
+      // 家庭码以前只藏在报告页最底下，家长翻半天也找不着。
+      // 单独给一个入口，和报告一样要口令（家庭码等于全家的钥匙）。
+      '<button class="btn btn-ghost btn-block" data-act="sync">跨设备同步（家庭码 · 需口令）</button>' +
       '</div>' +
 
       '<p class="footnote">数据只保存在这台设备上，不会上传。</p>';
@@ -1309,6 +1443,24 @@
       syncCardHtml();
   }
 
+  // 跨设备同步单独一页。它以前只挂在报告页最底下，家长得先进报告、
+  // 再一直滑到最底才看得见 —— 结果就是"哪儿都找不到填家庭码的地方"。
+  function viewSync() {
+    return '' +
+      '<div class="topbar">' +
+      '<button class="btn-icon" data-act="home">←</button>' +
+      '<span class="topbar-title">跨设备同步</span><span class="topbar-right"></span></div>' +
+      '<div class="card">' +
+      '<h2 class="card-title">家庭码是干什么的</h2>' +
+      '<p class="card-note">两台设备填同一个家庭码（比如孩子的平板 + 家长的手机），' +
+      '孩子写的字就能在另一台上批，批完的结果自动回到孩子那台。' +
+      '填一次就够，以后不用再点同步。</p>' +
+      '<p class="card-note">语文和数学共用同一个码 —— 一个码，两门课都在里面。</p>' +
+      '</div>' +
+      cloudReportsHtml() +
+      syncCardHtml();
+  }
+
   // 统计快照：覆盖写，云端只留每台设备的最新一份。
   // 全量历史就在孩子设备上（history 上限 2000 条），没必要再往云端堆一份。
   function reportSnapshot() {
@@ -1672,20 +1824,22 @@
   var lastView = null, lastCursor = -1;
 
   function render() {
-    // 家长端只在家长端这两个页面里算"已解锁"，一离开就锁上。
+    // 家长端只在家长端这几个页面里算"已解锁"，一离开就锁上。
     // 解锁一次就一直开着的话，家长批到一半把手机递给孩子，孩子接着点就能
     // 翻到全部答案、还能替自己点"写对了" —— 口令等于只挡第一次。
-    if (app.view !== 'parent' && app.view !== 'report') {
+    if (app.view !== 'parent' && app.view !== 'report' && app.view !== 'sync') {
       app.parentUnlocked = false;
       app.passInput = '';
+      app.afterUnlock = '';
     }
     var root = el('app');
     var html = app.view === 'practice' ? viewPractice()
       : app.view === 'done' ? viewDone()
         : app.view === 'report' ? viewReport()
-          : app.view === 'parent' ? viewParent()
-            : app.view === 'ref' ? viewRef()
-              : viewHome();
+          : app.view === 'sync' ? viewSync()
+            : app.view === 'parent' ? viewParent()
+              : app.view === 'ref' ? viewRef()
+                : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' +
       (app.storageWarn ? '<div class="card card-warn">' + esc(app.storageWarn) + '</div>' : '') +
       // 同步相关的提示（比如"这条别人已经批过了"）放在最上面 ——
@@ -1702,7 +1856,8 @@
       var grid = isZ ? 'tian' : (((app.state.mode || 'py2word') === 'word2py') ? 'pinyin' : 'tian');
       // 组词：每词一行、固定 4 格（2~4 字的词都放得下）
       var zCols = isZ && it ? it.perRow : 0;
-      setupCanvas(el('writeCanvas'), nCells, app.strokes, true, grid, zCols);
+      // 竖排 + 靠右：格子排在右边一列，左边留白给手掌（见 styles.css 的 .write-wrap）
+      setupCanvas(el('writeCanvas'), nCells, app.strokes, true, grid, zCols, true);
     }
     if (app.view === 'parent' && app.parentUnlocked) {
       var p0 = queueHead();
@@ -1801,6 +1956,22 @@
       refreshGrades();      // 顺带看看有没有家长在别处批的结果
       return render();
     }
+    if (act === 'sync') {
+      // 家庭码 = 全家的钥匙（拿到码的人能看报告、也能批改），所以和报告同一道门。
+      if (!app.parentUnlocked) {
+        app.view = 'parent';
+        app.passInput = '';
+        app.afterUnlock = 'sync';   // 口令一过就直接进同步页，不用家长再找一遍
+        app.message = '跨设备同步也要口令 —— 家庭码就是这家的钥匙，别让孩子拿着。';
+        return render();
+      }
+      app.view = 'sync';
+      app.afterUnlock = '';
+      app.famInput = '';
+      app.cloudMsg = '';
+      refreshReports();
+      return render();
+    }
     if (act === 'parent') {
       app.view = 'parent';
       app.passInput = '';
@@ -1819,6 +1990,13 @@
       app.parentUnlocked = true;
       saveState();
       refreshCloudWork();
+      if (app.afterUnlock === 'sync') {   // 从首页「跨设备同步」进来的，直奔同步页
+        app.afterUnlock = '';
+        app.view = 'sync';
+        app.famInput = '';
+        app.message = '';
+        refreshReports();
+      }
       return render();
     }
     if (act === 'unlock') {
@@ -1828,6 +2006,13 @@
       }
       app.parentUnlocked = true;
       refreshCloudWork();
+      if (app.afterUnlock === 'sync') {
+        app.afterUnlock = '';
+        app.view = 'sync';
+        app.famInput = '';
+        app.message = '';
+        refreshReports();
+      }
       return render();
     }
     if (act === 'grade-ok') return gradeCurrent(true);

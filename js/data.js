@@ -5448,7 +5448,7 @@
       "lessons": [
         {
           "no": 24,
-          "title": "（现代文，见课本）",
+          "title": "我将无我，不负人民",
           "star": false,
           "chars": [
             {

@@ -105,7 +105,8 @@ function boot(seed) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
 
-  ['data', 'store', 'app'].forEach(name => {
+  // 顺序跟 index.html 保持一致（data → recite → jiaoan → store → cloud → app）
+  ['data', 'recite', 'jiaoan', 'store', 'cloud', 'app'].forEach(name => {
     const file = path.join(ROOT, 'js', name + '.js');
     vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
   });
@@ -483,19 +484,110 @@ test('存不进去、读坏了都要在首页明说，不能静默', () => {
 
 /* ==================== 画布随屏幕转 ==================== */
 test('转屏之后画布重新量一次，一次落笔仍然只是一笔', () => {
-  const app = boot();
-  app.click('start');
-  assert.ok(app.canvas.width > 0, '画布应当已经按容器宽度铺好');
+  const t = boot();
+  t.click('start');
+  assert.ok(t.canvas.width > 0, '画布应当已经按格子铺好');
 
-  app.canvas.parentNode.clientWidth = 200;   // 转成竖屏，窄了一截
-  app.resize();
-  assert.strictEqual(app.canvas.width, 200,
+  const app = t.sandbox.__cc.app;
+  const n = app.session[app.cursor].text.length;
+
+  t.canvas.parentNode.clientWidth = 200;   // 转成竖屏，窄了一截
+  t.resize();
+  // 画布宽度 = 那几格实际占的宽度（竖排一列，比容器窄）
+  const L = t.sandbox.__cc.cellLayout(n, 200, 'tian', 0, true);
+  const CW = L.pad * 2 + L.cols * L.w + (L.cols - 1) * L.gap;
+  assert.strictEqual(t.canvas.width, CW,
     '位图宽度不跟着改的话，笔迹会和格子错位，家长看到的是歪的');
+  assert.ok(CW < 200, '左边要留出空白给手掌');
 
-  app.draw();
-  app.click('submit');
-  assert.strictEqual(app.state().pending[0].strokes.length, 1,
+  t.draw();
+  t.click('submit');
+  assert.strictEqual(t.state().pending[0].strokes.length, 1,
     '重量尺寸时不能把指针事件再绑一遍：一笔被记成两笔，家长批的就不是孩子写的那个字');
+});
+
+/* ==================== 书写区：靠右竖排 + 跨格笔迹 ==================== */
+test('练习页的格子竖着排一列，画布只占右边那一块', () => {
+  const t = boot();
+  t.click('start');
+  const app = t.sandbox.__cc.app;
+  const n = app.session[app.cursor].text.length;
+
+  const L = t.sandbox.__cc.cellLayout(n, 320, 'tian', 0, true);
+  assert.strictEqual(L.cols, 1, '竖排：一列');
+  assert.strictEqual(L.rows, n, '几个字就几行');
+
+  const CW = L.pad * 2 + L.cols * L.w + (L.cols - 1) * L.gap;
+  assert.strictEqual(t.canvas.width, CW, '画布宽度应当正好是格子占的那一块');
+  assert.ok(CW < 320, '不能铺满整行 —— 空出来的地方是留给手掌的');
+  assert.strictEqual(t.canvas.style.width, CW + 'px', '靠右摆靠的就是这个固定宽度');
+});
+
+test('一笔写到格子外面，笔迹跟着往外走，不会弹回格子里', () => {
+  const t = boot();
+  t.click('start');
+  const app = t.sandbox.__cc.app;
+
+  // 挑一条两字以上的题：要跨到第二个格子才测得到
+  const wide = app.session.filter(it => it.text && it.text.length >= 2);
+  assert.ok(wide.length, '这一课里应当有词语题');
+  app.session = [wide[0]];
+  app.cursor = 0;
+  t.click('clear');   // 借一次重渲染，让画布按这道题重排
+
+  const n = app.session[0].text.length;
+  const L = t.sandbox.__cc.cellLayout(n, 320, 'tian', 0, true);
+  const from = { x: L.pad + L.w / 2, y: L.pad + L.h / 2 };                    // 第 1 格中心
+  const to = { x: L.pad + L.w / 2, y: L.pad + L.h + L.gap + L.h / 2 };        // 第 2 格中心
+
+  const fire = (type, x, y) => (t.canvas._ptr[type] || []).forEach(fn => fn({
+    clientX: x, clientY: y, pointerId: 1, preventDefault: noop
+  }));
+  fire('pointerdown', from.x, from.y);
+  fire('pointermove', to.x, to.y);
+  fire('pointerup', to.x, to.y);
+
+  const s = app.strokes[0];
+  assert.strictEqual(s.cell, 0, '整笔按起笔那一格记');
+  // 第二个点是"第一格往下 1 格多"，不是"第二个格子里偏上" ——
+  // 按后者还原的话，笔迹会从格子里跳回格子顶上，看着就是一条横穿格子的直线。
+  assert.ok(Math.abs(s.pts[1].v - (to.y - L.pad) / L.h) < 1e-6,
+    '整笔必须只用起笔那一格当基准换算');
+  assert.ok(s.pts[1].v > 1, '笔尖走出格子就写在格子外面，不该弹回去');
+});
+
+/* ==================== 家庭码入口 ==================== */
+test('首页就能找到家庭码：先过口令，过了直接进同步页', () => {
+  const t = boot();
+  assert.ok(t.html().includes('跨设备同步'), '首页家长区要有家庭码的入口');
+
+  t.click('sync');
+  assert.ok(t.html().includes('先设一个口令'),
+    '家庭码等于全家的钥匙，第一道门是口令');
+
+  t.type('passInput', '1234');
+  t.click('set-pass');
+  const html = t.html();
+  assert.ok(html.includes('跨设备同步') && html.includes('家庭码是干什么的'),
+    '口令过了直接落到同步页，不用家长再自己找');
+  assert.ok(html.includes('生成新码'), '这台是第一台时：能生成一个家庭码');
+  assert.ok(html.includes('用这个码'), '另一台已经生成过时：能把码填进来');
+});
+
+test('已经设过口令：再点同步只要输一次，不用重设', () => {
+  const t = boot();
+  t.click('sync');
+  t.type('passInput', '1234');
+  t.click('set-pass');
+  t.click('home');
+
+  t.click('sync');
+  assert.ok(t.html().includes('请输入口令'), '离开家长页就重新锁上，这道门一直有效');
+  assert.ok(t.html().indexOf('先设一个口令') === -1, '设过了就不该再要设一次');
+
+  t.type('passInput', '1234');
+  t.click('unlock');
+  assert.ok(t.html().includes('家庭码是干什么的'), '输对了直接落到同步页');
 });
 
 /* ==================== 资料查阅 ==================== */
@@ -655,6 +747,36 @@ test('轻点一下（写拼音 i、j 的点）不会误清空格子', () => {
   const st = app.state();
   assert.strictEqual((st.pending || []).length, 1, '轻点写了个点，笔迹应当还在、能交上去');
   assert.ok(st.pending[0].strokes.length >= 2, '点的笔迹也要留在格子里');
+});
+
+/* ==================== 教案（课堂进度 / 本课重点） ==================== */
+
+test('首页「本周课堂」：点在进度里的课能直接跳过去', () => {
+  const app = boot();
+  const home = app.html();
+  const m = /data-act="goto-lesson" data-u="(U\d)" data-l="(\d+)"/.exec(home);
+  if (!m) {
+    // 今天在假期里（进度表只覆盖 9 月到次年 1 月），卡片本来就不出现
+    assert.ok(!home.includes('本周课堂') && !home.includes('下一周课堂'),
+      '不在学期里就不该显示课堂进度卡片');
+    return;
+  }
+  assert.ok(home.includes('本周课堂') || home.includes('下一周课堂'),
+    '显示了进度按钮，就该有对应的标题');
+  app.click('goto-lesson', { u: m[1], l: m[2] });
+  const st = app.state();
+  assert.strictEqual(st.unit, m[1], '点进度里的课应当切到那个单元');
+  assert.strictEqual(String(st.lesson), m[2], '点进度里的课应当切到那一课');
+});
+
+test('资料页有「本课重点」和「写字要点」（教案）', () => {
+  const app = boot();
+  app.click('lesson', { l: '1' });   // 第一单元《观潮》
+  app.click('ref');
+  const html = app.html();
+  assert.ok(html.includes('写字要点（教案）'), '资料页应当有教案里的写字要点');
+  assert.ok(html.includes('本课重点（教案）'), '选了课时就该显示那一课的重点');
+  assert.ok(html.includes('观潮'), '本课重点要写明是哪一课');
 });
 
 /* ==================== 组词训练 ==================== */

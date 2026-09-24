@@ -5,6 +5,7 @@
   "description": "语文小教练：看拼音在田字格里手写，交给家长批改，按间隔复习巩固字词（纯前端，零部署）",
   "scripts": {
     "test": "node --test \"tests/**/*.test.js\"",
-    "gen-data": "python scripts/gen_data.py"
+    "gen-data": "python scripts/gen_data.py",
+    "gen-jiaoan": "python scripts/gen_jiaoan.py"
   }
 }

@@ -155,8 +155,11 @@ html, body {
   border-radius: 999px;
 }
 
-.write-wrap { background: var(--bg); border-radius: 12px; padding: 4px; }
-.write-wrap canvas { display: block; width: 100%; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+/* 书写区：格子靠右排（画布宽度由 JS 按格子实际占用设成固定像素）。
+   左边那条空白是故意留的 —— 孩子右手写字时手掌就压在那儿，落在空白上
+   不会留下笔迹；画布铺满整行的话，那些掌痕会跟着一起被画出来。 */
+.write-wrap { background: var(--bg); border-radius: 12px; padding: 4px; display: flex; justify-content: flex-end; }
+.write-wrap canvas { display: block; max-width: 100%; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .py-hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
 .lesson-tag { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
 .lesson-off {
@@ -240,6 +243,27 @@ html, body {
 
 .ref-tricky { padding: 7px 0; font-size: 14px; line-height: 1.6; border-bottom: 1px dashed var(--line); }
 .ref-tricky:last-child { border-bottom: none; }
+
+/* 教案区块：本课重点 / 写字要点（只读，不进练习） */
+.ja-block { margin-top: 12px; }
+.ja-block:first-child { margin-top: 0; }
+.ja-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: .5px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+.ja-line {
+  font-size: 14px;
+  line-height: 1.65;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.ja-line:last-child { border-bottom: none; }
+.ja-line b { font-size: 16px; }
 
 /* 练习模式切换（看拼音写词语 / 看词语写拼音） */
 .mode-row { display: flex; gap: 8px; margin-bottom: 12px; }
