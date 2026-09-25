@@ -1097,6 +1097,9 @@
     var st = app.state;
     var pending = st.pending.length;
     var graded = (st.history || []).length;
+    // 写错过几条 —— 用来把「查看批改」那张卡提亮、给一个明确的数字。
+    // 用合并后的记录：家长手机上本机是空的，只数本机就成了 0。
+    var wrongN = mergedHistory().filter(function (h) { return !h.isCorrect; }).length;
     var unit = st.unit;
     var lesson = st.lesson || 'all';
 
@@ -1177,13 +1180,26 @@
           '<button class="btn btn-soft btn-block" data-act="parent">去批改</button></div>'
         : '') +
 
+      // 「查看批改」单独一张卡，而且按"有没有写错的"换颜色。
+      // 孩子翻它是为了看自己错在哪、好订正 —— 塞在"资料"那堆小灰按钮里等于藏起来了。
+      '<div class="card ' + (wrongN ? 'card-warn' : 'card-cta') + '">' +
+      '<h2 class="card-title">' + (wrongN
+        ? '有 ' + wrongN + ' 条写错过的'
+        : '查看批改') + '</h2>' +
+      '<p class="card-note">' + (wrongN
+        ? '点进去能看到自己当时写成了什么样、家长说了什么 —— 写错的排在最前面。'
+        : (graded
+          ? '家长批过的都在这里，写错的会排在最前面。'
+          : '家长批过之后，这里能看到当时的对错和批注。')) +
+      '</p>' +
+      '<button class="btn btn-primary btn-block" data-act="my-grades">' +
+      (wrongN ? '去看写错的（' + wrongN + ' 条）' : '查看批改' + (graded ? '（' + graded + ' 条）' : '')) +
+      '</button>' +
+      '</div>' +
       '<div class="card card-quiet">' +
       '<h2 class="card-title">资料</h2>' +
-      '<p class="card-note">只读查阅：二类字（识字表）、多音字、易错字；批改过的也在这里翻。</p>' +
+      '<p class="card-note">只读查阅：二类字（识字表）、多音字、易错字。</p>' +
       '<button class="btn btn-ghost btn-block" data-act="ref">二类字 / 多音字 / 易错字</button>' +
-      // 家长批过的东西得随时能翻回来看 —— 首页给一个入口，练习页里也有一个
-      '<button class="btn btn-ghost btn-block" data-act="my-grades">查看批改' +
-      (graded ? '（' + graded + ' 条）' : '') + '</button>' +
       '</div>' +
 
       '<div class="card">' +
@@ -1263,8 +1279,16 @@
     var lead = it.idx > 1
       ? '上一句是：「' + esc(it.hint) + '」'
       : '这是开头第一句。';
+    // 背过的东西隔一阵就会忘掉细节：给一个起手提示（开头两个字）+ 字数，
+    // 让他能顺着想起来。一个提示都不给的话，忘掉一个字就整句卡死 ——
+    // 那考的就成了"复述"，而不是"想起来"。
+    var plain = normRecite(it.text || '');
+    var tip = plain.length > 3
+      ? '提示：开头是「' + esc(plain.slice(0, 2)) + '」，这一句共 ' + plain.length + ' 个字'
+      : '';
     var body = '' +
       '<div class="card-note">接着写第 ' + it.idx + ' 句（这一段共 ' + it.total + ' 句）</div>' +
+      (tip ? '<div class="card-note">' + tip + '</div>' : '') +
       // class 复用 note-input：现成的文本输入框样式，不必再新增一套
       '<input id="typedInput" class="note-input" type="text" inputmode="text" ' +
       'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" ' +
@@ -1411,7 +1435,9 @@
         '<span class="topbar-title">家长批改</span><span class="topbar-right"></span></div>' +
         '<div class="card">' +
         '<h2 class="card-title">没有待批改的</h2>' +
-        '<p class="card-note">孩子写完这里就会出现。最近批过 ' + st.history.length + ' 条。' +
+        // 数的是**合并后**的记录：手机这台本机一条都没有（作业和批改记录都在平板
+        // 那台设备上），只数本机的话会显示"最近批过 0 条"，家长一看就懵。
+        '<p class="card-note">孩子写完这里就会出现。最近批过 ' + mergedHistory().length + ' 条。' +
         (F && F.on() ? '点下面的「看看有没有新交上来的作业」，孩子刚交的马上就出来。' : '') +
         '</p>' +
         '</div>' +
@@ -1950,7 +1976,13 @@
   // 以前只有首页那张一次性的「家长刚批改了 N 条」，点过"知道了"就再也看不到 ——
   // 而"上次说我把『崩』的山字头写丢了"恰恰是下次下笔前要再看一眼的东西。
   function viewMyGrades() {
-    var hist = mergedHistory().slice().reverse();
+    // 写错的排最前面：孩子翻这一页是为了订正，不是来数自己对了几条的。
+    // 同一组里按时间倒序（最近的在上面）。
+    var hist = mergedHistory().slice().sort(function (a, b) {
+      var wa = a.isCorrect ? 1 : 0, wb = b.isCorrect ? 1 : 0;
+      if (wa !== wb) return wa - wb;
+      return (b.ts || 0) - (a.ts || 0);
+    });
     var head = '<div class="topbar">' +
       '<button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">查看批改</span>' +
@@ -2970,7 +3002,12 @@
         // 这里把撞上的条数说一句，顺便把队列刷新成最新的。
         onGraded: function (data) {
           if (data && data.dup > 0) {
-            app.cloudMsg = '有 ' + data.dup + ' 条已经被另一台设备批过了（先批的为准），队列已刷新。';
+            // 说"被另一台设备批过"是错的：绝大多数情况是**它自己上一次**已经传上去了，
+            // 只是那次的回信没等到（超时）。同一条只认第一次，所以这里只说明结果，
+            // 不猜是谁批的 —— 猜错了家长会以为家里有人在另一台设备上动过。
+            app.cloudMsg = '有 ' + data.dup + ' 条之前已经批过了（同一条只认第一次，先到的为准）。' +
+              '如果家里只有这一台在批，那多半是上一次提交其实已经传上去了、只是没等到回信 —— ' +
+              '不一定是别的人在批。队列已刷新。';
             refreshCloudWork();
           }
         }
