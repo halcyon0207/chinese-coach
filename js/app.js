@@ -1204,7 +1204,7 @@
 
       '<div class="card">' +
       '<h2 class="card-title">选择题与默写</h2>' +
-      '<p class="card-note">这两种由程序自己判，不用等家长批改 —— 当场就知道对错，错了马上能订正。</p>' +
+      '<p class="card-note">当场判分，不用等家长批。</p>' +
       (polyCount
         ? '<button class="btn btn-soft btn-block" data-act="start-poly">多音字选读音（' + polyCount + ' 题）</button>'
         : '<p class="card-note">本单元还没有多音字数据。</p>') +
@@ -1372,7 +1372,7 @@
       prevInk +
       '<div class="write-wrap"><canvas id="writeCanvas"></canvas></div>' +
       '<div class="py-hint">' + hint + '</div>' +
-      '<p class="card-note">长按某个格子，可只清空并重写那一个字；写点（i、j 的点）不受影响。</p>' +
+      '<p class="card-note">长按格子可只重写那一个字。</p>' +
       (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
       (app.submitMsg ? '<div class="feedback warn">' + esc(app.submitMsg) + '</div>' : '') +
       '<div class="action-row">' +
@@ -1387,9 +1387,8 @@
       (pendingCount ? '（' + pendingCount + '）' : '') + '</button>' +
       '</div>' +
       '<p class="card-note">' + (pendingCount
-        ? '已经写好 ' + pendingCount + ' 条（都在这台设备上）。点一下就把这些全部一起传上去，' +
-          '家长在另一台设备上就能批了 —— 不点它不会自己传。'
-        : '不会自动上传：先在田字格里写、点「写好了」攒着，凑够了再点上面这个按钮一起传。') + '</p>' +
+        ? '写好 ' + pendingCount + ' 条了，点上面那个按钮才传 —— 不会自动上传。'
+        : '不会自动上传：写完攒着，点上面那个按钮一起传给家长。') + '</p>' +
       '</div>';
   }
 
@@ -1487,7 +1486,6 @@
       '<button class="btn btn-soft" data-act="grade-bad">写错了</button>' +
       '<button class="btn btn-primary" data-act="grade-ok">写对了</button>' +
       '</div>' +
-      '<p class="card-note">批注会跟着这个词存下来，下次复习时会再显示给孩子看。</p>' +
       '</div>' +
 
       submitGradesCard() +
@@ -1663,7 +1661,6 @@
       Math.round(ok / done * 100) + '%），写错 ' + wrong + ' 条。' +
       '最近 7 天批了 ' + r7.length + ' 条' +
       (last && last.ts ? '，最近一次 ' + esc(fmtDay(last.ts)) : '') + '。</p>' +
-      '<p class="card-note">要按 今天 / 7 天 / 30 天 / 全部 翻更细的统计，去「练习报告」。</p>' +
       // 明细只留一处：这里给带笔迹的那一份，孩子能对着自己当时写的字看错在哪
       '<button class="btn btn-ghost btn-block" data-act="my-grades">' +
       '看每一条（带当时写的字）</button>' +
@@ -1800,7 +1797,6 @@
 
     return '<div class="card card-quiet">' +
       '<h2 class="card-title">别的设备上</h2>' +
-      '<p class="card-note">下面是另 ' + rows.length + ' 台设备最近一次上传的情况（本机在上面）。</p>' +
       '<ul class="tag-list">' + list + '</ul>' +
       '</div>';
   }
@@ -1815,8 +1811,7 @@
         return '<button class="unit-btn' + (r.k === cur ? ' on' : '') +
           '" data-act="range" data-r="' + r.k + '">' + r.name + '</button>';
       }).join('') + '</div>' +
-      '<p class="card-note">切换只影响下面「批改记录」和「错题」两块；' +
-      '上面的总览、按题型、按单元一直是全部（累计）。</p>' +
+      '<p class="card-note">只筛下面的明细，上面的统计一直是全部（累计）。</p>' +
       '</div>';
   }
 
@@ -1951,7 +1946,7 @@
       '排在最前面），不用手动挑 —— 这一段只是让你一眼看出哪几个字是老大难。</p>' +
       worstHtml + '</div>' +
       '<div class="card"><h2 class="card-title">错题（' + rangeTxt + '，最多 20 条）</h2>' +
-      '<p class="card-note">后面那句是家长批改时写的批注。</p>' + wrongList + '</div>';
+      wrongList + '</div>';
   }
 
   function viewReport() {
@@ -1964,9 +1959,6 @@
       '<div class="card card-quiet">' +
       '<p class="card-note">这一页是统计。要看"哪一次批的是对是错、家长当时写了什么批注"，' +
       '去「查看批改」。</p>' +
-      '<p class="card-note">注：孩子写的原字只存在他自己那台设备上（订正和历史回看都在那儿翻，' +
-      '一点不缺）。所以在这台手机的报告里看不到原字 —— 但**批改的时候是看得到的**，' +
-      '那才是要看着字判分的地方。</p>' +
       '<button class="btn btn-ghost btn-block" data-act="my-grades">' +
       '看每一条（带当时写的字）</button>' +
       '<button class="btn btn-ghost btn-block" data-act="sync">跨设备同步设置</button>' +
@@ -2030,12 +2022,6 @@
       '<h2 class="card-title">最近批改的 ' + Math.min(40, hist.length) + ' 条</h2>' +
       '<p class="card-note">批过 ' + hist.length + ' 条，其中写错 ' + wrong + ' 条。' +
       '写错的今天还会再出现一次，趁热重写一遍。</p>' +
-      // 一台笔迹都没有，说明这些记录是从别的设备同步过来的统计
-      // （笔迹只留在产出它的那台设备上）。不说清楚，家长会以为笔迹功能坏了。
-      (hist.length && !hist.some(function (h) { return h.strokes && h.strokes.length; })
-        ? '<p class="card-note">孩子写的原字只存在他自己那台设备上 —— 这里是从那边' +
-          '同步过来的记录。要看原字，去他那台设备上翻（批改的时候是看得到的）。</p>'
-        : '') +
       rows +
       '</div>';
   }
@@ -2835,6 +2821,10 @@
       app.view = 'home';
       app.session = null;
       app.submitMsg = '';
+      // 同步类的提示（"有 N 条之前已经批过""没能开启同步"）都是一次性通知：
+      // 回首页就翻篇。不清的话它会在页面顶上一直挂到下次联网，白占一块地方。
+      app.cloudMsg = '';
+      app.message = '';
       return render();
     }
     if (act === 'quit') {
@@ -3040,9 +3030,10 @@
             // 说"被另一台设备批过"是错的：绝大多数情况是**它自己上一次**已经传上去了，
             // 只是那次的回信没等到（超时）。同一条只认第一次，所以这里只说明结果，
             // 不猜是谁批的 —— 猜错了家长会以为家里有人在另一台设备上动过。
-            app.cloudMsg = '有 ' + data.dup + ' 条之前已经批过了（同一条只认第一次，先到的为准）。' +
-              '如果家里只有这一台在批，那多半是上一次提交其实已经传上去了、只是没等到回信 —— ' +
-              '不一定是别的人在批。队列已刷新。';
+            // 一句就够，而且只放在**批改页**（app.message 是那一页的提示位）。
+            // 这本来就是个没人需要做任何事的事件：长解释挂在页面上，
+            // 谁下次打开都碍眼，现在首页更不会挂着它。
+            app.message = '有 ' + data.dup + ' 条之前已经批过，已按先到的为准刷新。';
             refreshCloudWork();
           }
         }
