@@ -50,6 +50,8 @@
     redo: false,
     // 本次渲染要回放笔迹的小画布列表：由视图函数填好，render() 负责铺开
     _miniReplay: [],
+    // 返回首页时要滚回哪儿 —— 见 onClick 里的记录（null = 用默认的滚到页首）
+    homeAnchor: null,
     // 别的设备传上来等批改的作业（只在内存里，不落本地存储）
     cloudWork: [],
     cloudReports: [],
@@ -2747,13 +2749,42 @@
       (app.view === 'practice' && app.cursor !== lastCursor);
     lastView = app.view;
     lastCursor = app.cursor;
-    if (needTop) window.scrollTo(0, 0);
+    // 回到首页：滚回"当初是从哪儿点进去的"（位置在 onClick 里记下）。
+    // 只用一次就清掉 —— 留着的话，别的操作（比如草稿续练写完回首页）
+    // 也会被拖到一个早就没意义的旧位置。
+    if (app.view === 'home' && typeof app.homeAnchor === 'number') {
+      window.scrollTo(0, app.homeAnchor);
+      app.homeAnchor = null;
+    } else if (needTop) {
+      window.scrollTo(0, 0);
+    }
   }
+
+  // 在首页上点这些按钮是"原地刷新"，不换页面 —— 不该记位置，也不该滚。
+  var HOME_STAY = {
+    unit: 1, lesson: 1, mode: 1, range: 1,
+    'drop-draft': 1, 'ack-feedback': 1, home: 1
+  };
 
   function onClick(e) {
     var t = e.target.closest ? e.target.closest('[data-act]') : null;
     if (!t) return;
     var act = t.getAttribute('data-act');
+
+    // 从首页点进某个页面之前，记下"是从哪儿点进去的"。
+    //
+    // 原来从二级页面（批改 / 报告 / 查看批改 / 资料…）返回首页，一律滚回页首。
+    // 首页一长、要往下翻才点得到这些入口，返回时刚点的地方就找不着了 ——
+    // 尤其家长连着批几条的时候，每次都得从头再翻一遍。
+    // 记的是**那个按钮**在页面里的位置（不是单纯记滚动条），
+    // 这样返回时它正好还看得见。
+    if (app.view === 'home' && !HOME_STAY[act]) {
+      var sy = (typeof window !== 'undefined' && window.scrollY) || 0;
+      var r = t.getBoundingClientRect ? t.getBoundingClientRect() : null;
+      // 往上留 96px，别让按钮贴在屏幕最上沿
+      app.homeAnchor = r ? Math.max(0, r.top + sy - 96) : sy;
+    }
+
     if (typeof t.blur === 'function') t.blur();
 
     if (act === 'unit') {
