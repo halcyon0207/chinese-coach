@@ -1717,6 +1717,13 @@
   function submitGradesCard() {
     var on = !!(F && F.on());
     var n = on ? F.pendingGrades() : 0;
+    // 有攒着没传的、而且上次失败了，就把原因摆出来 —— 不然家长只能反复点，
+    // 猜是网不好还是自己点错了。
+    var why = '';
+    if (on && n && F.statusText) {
+      var t = F.statusText();
+      if (t && t.indexOf('暂不可用') >= 0) why = t;
+    }
     return '<div class="card card-quiet">' +
       '<h2 class="card-title">提交批改</h2>' +
       '<p class="card-note">' + (on
@@ -1724,6 +1731,7 @@
           ? '已经批好 ' + n + ' 条，还没传上去。点一下提交，孩子那台设备下次联网就能看到。'
           : '批好的结果会自动传；也可以点一下马上提交。')
         : '这台设备没开跨设备同步，批改结果只留在这台设备上，孩子在别的设备上看不到。') + '</p>' +
+      (why ? '<div class="feedback warn">' + esc(why) + '</div>' : '') +
       '<button class="btn btn-primary btn-block" data-act="submit-grades"' +
       (on ? '' : ' disabled') + '>' + (n ? '提交批改（' + n + '）' : '提交批改') + '</button>' +
       // 孩子刚交上来、家长正等着的场景很常见。刻意不做定时轮询（见 refreshCloudWork
@@ -2113,9 +2121,19 @@
   // 打开页面 / 从后台切回时取一次"家长在别处批的结果"。
   function refreshGrades() {
     if (!F || !F.on()) return;
-    F.pullGrades(app.acked || []).then(function () {
-      app.acked = [];   // 回执送到了，云端已经把这几条删掉
-    }).catch(function () { /* 连不上就算了，下次再试 */ });
+    // 先把要送的回执取走，**不能等回调里再清**：这次请求回来的路上，
+    // applyGrades 会把"刚拿到的那些结果"记成新的回执 —— 在成功回调里
+    // 一刀清空，连这些新回执一起抹掉了。云端于是永远收不到 ack，
+    // 批改结果越堆越多（实测堆到过 177 条），而云端文件越大、每次请求越慢，
+    // 又更容易超时 —— 和"批完没传上去"是同一个坑的两头。
+    var acks = (app.acked || []).slice();
+    app.acked = [];
+    F.pullGrades(acks).then(function () {
+      // 送到了。这期间新拿到的结果已经记进 app.acked，留给下次送。
+    }).catch(function () {
+      // 没送到就补回去，下次再带 —— 丢了的话云端那几条永远删不掉
+      app.acked = acks.concat(app.acked || []);
+    });
   }
 
   // 进家长批改页时拉一次别的设备传上来的作业（笔迹只放内存，不落本地存储）。
@@ -2561,7 +2579,21 @@
       for (var i = 0; i < mine.length; i++) if (mine[i].id === c.id) return false;
       return true;
     });
-    return mine.concat(cloud).sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+
+    // 本机已经批过、但那条 grade 还没送达云端的，从队列里挡掉。
+    //
+    // 为什么必须挡：云端那份作业要等 grade.push 到了才会删。而在它到达之前，
+    // 任何一次拉取（切回前台、点「看看有没有新作业」、进批改页）都会把这条
+    // 又拉回来 —— 家长看到的是"刚批过的怎么又冒出来了"，还会反复冒，像白批了。
+    // 待发队列（outbox）就是"我已经批了、只是还没送出去"的权威记录，用它挡最准，
+    // 而且它存在本机，重开页面也还在。
+    var s = F && F.sync();
+    var sent = {};
+    ((s && s.outbox) || []).forEach(function (g) { sent[g.id] = 1; });
+
+    return mine.concat(cloud)
+      .filter(function (x) { return !sent[x.id]; })
+      .sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
   }
 
   function queueHead() {
@@ -2602,7 +2634,10 @@
       for (var i = 0; i < app.state.pending.length; i++) {
         if (app.state.pending[i].id === g.id) { p = app.state.pending[i]; break; }
       }
-      if (!p) return;
+      // 本机队列里找不到这条作业：要么早处理过、要么它根本不属于这台设备 ——
+      // 两种情况都不该再留着。照旧回执，让云端把这批陈年结果清掉；
+      // 不回执的话它们会一直堆到 7 天过期，每次拉取都白传一遍。
+      if (!p) { acked.push(g.id); return; }
       applyResult(p, g.ok, g.note);
       acked.push(g.id);
     });

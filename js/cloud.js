@@ -227,7 +227,9 @@
         id: p.id,
         ts: p.ts,
         unit: p.unit || '',
-        devName: s.name || '',
+        // 没起过名字的设备别硬塞一个"设备"上去：家长那台手机上是这么显示的 ——
+        // 「这一条是「设备」上写的」，读起来像话没说完。空着，界面自己会说"另一台设备"。
+        devName: (s.name && s.name !== '设备') ? s.name : '',
         item: p.item,
         strokes: thinStrokes(p.strokes)
       };
