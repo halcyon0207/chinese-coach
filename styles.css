@@ -197,6 +197,32 @@ html, body {
   padding: 6px 9px;
 }
 
+/* 报告/查看批改里回放原始笔迹的小画布 */
+/* 宽度由 JS 按字数给（一个字 56px，最多 240px）—— 四字词的笔迹挤进
+   200px 的话一格只剩 50px，"少了一笔"这种错就正好看不出来 */
+.mini-ink {
+  flex: 1 1 100%;
+  margin-top: 6px;
+  width: 200px;
+  max-width: 100%;
+}
+/* 小画布上方那句说明："你写的是这样" */
+.ink-label {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* 订正轮次：题目旁边那块"你上次写的是这样" */
+.prev-ink {
+  margin: 8px 0 2px;
+}
+.mini-ink canvas {
+  display: block;
+  background: #fafafa;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
 .answer-line { font-size: 17px; margin-top: 12px; }
 .answer-line b { font-size: 22px; letter-spacing: .1em; }
 

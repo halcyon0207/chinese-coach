@@ -45,6 +45,11 @@
     // 不用家长再自己找一遍。见 onClick 的 'sync' 和 viewSync()。
     afterUnlock: '',
     note: '',
+    // 这一轮是不是"订正"（把家长刚批错的重写一遍）。订正轮次里会在题目旁边
+    // 摆出"你上次写成了什么样"，正常练习时不摆。
+    redo: false,
+    // 本次渲染要回放笔迹的小画布列表：由视图函数填好，render() 负责铺开
+    _miniReplay: [],
     // 别的设备传上来等批改的作业（只在内存里，不落本地存储）
     cloudWork: [],
     cloudReports: [],
@@ -477,10 +482,12 @@
 
   function posOf(cv, e) {
     var r = rectOf(cv);
-    // 取整：笔迹是一笔一笔存进 localStorage 的，小数点能省掉三分之一的体积
+    // 不取整：以前 Math.round 之后，电容笔慢速移动时相邻两个采样点可能
+    // 落到同一个整数坐标上，lineTo 画的是零长线段 —— 看起来就像笔画断了一截。
+    // 存进 localStorage 的是归一化坐标（u/v），本来就是小数，这里取整不省体积。
     return {
-      x: Math.round(e.clientX - r.left),
-      y: Math.round(e.clientY - r.top)
+      x: e.clientX - r.left,
+      y: e.clientY - r.top
     };
   }
 
@@ -643,8 +650,20 @@
       else if (penLive() || (penAt && Date.now() - penAt < 400)) return;
       if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) {} }
       var p = posOf(cv, e);
-      // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"
       var anchor = cellAt(p);
+      // 如果上一笔刚被 pointercancel 打断（手掌识别 / 系统手势），且是同一类指针，
+      // 就接着上一笔写 —— 断点处连上，字不会从中间断成两截。
+      var graceType = isPen ? 'pen' : (e.pointerType || '');
+      var g = cancelGrace[graceType];
+      if (g && !g.dead) {
+        cancelGrace[graceType] = null;
+        live[e.pointerId] = g;
+        g.pts.push(normAt(p, g.cell));
+        drawDot(ctx, p);
+        e.preventDefault();
+        return;
+      }
+      // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"
       var s = {
         cell: anchor, pts: [normAt(p, anchor)], downPos: p,
         moved: false, holdTimer: null, norm: true, pen: isPen
@@ -707,12 +726,37 @@
         geo.redraw();
       }
     }
+
+    // pointercancel: 浏览器可能因为手掌识别、系统手势（边缘滑动返回等）
+    // 把当前指针取消掉。直接删掉这一笔的话，电容笔还压在屏上、接着写就从
+    // 断点起了一笔新的 —— 字中间就断了一截。所以给一个很短的宽限：
+    // 同一类指针（笔 / 手指）如果很快又落下，就接着上一笔写；超过宽限才算真结束。
+    var cancelGrace = {};
+    function cancelStroke(e) {
+      var s = live[e.pointerId];
+      if (!s) return;
+      stopHold(s);
+      delete live[e.pointerId];
+      var type = e.pointerType || '';
+      cancelGrace[type] = s;
+      setTimeout(function () {
+        if (cancelGrace[type] !== s) return;   // 已经被新的 pointerdown 接住了
+        cancelGrace[type] = null;
+        if (e.pointerType === 'pen') penAt = Date.now();
+        if (s.dead) return;
+        if (s.pts.length === 1 && s.cell < 0) {
+          dropStroke(s);
+          geo.redraw();
+        }
+      }, 150);
+    }
     // 不用 pointerleave：笔尖滑到画布边缘外（画布现在只有一列那么宽，
     // 很容易碰到）就被判成"这一笔写完了"，孩子接着写就从那儿断开。
     // 已经 setPointerCapture 了，出了画布 pointermove / pointerup 照样送到这里。
-    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (t) {
-      cv.addEventListener(t, endStroke);
-    });
+    // lostpointercapture 不结束笔画：浏览器可能因为系统手势暂时夺走 capture，
+    // 但指针还按着，等它回来 pointermove 会接着画；在这里 endStroke 反而会把字截断。
+    cv.addEventListener('pointerup', endStroke);
+    cv.addEventListener('pointercancel', cancelStroke);
   }
 
   // 转屏、软键盘收起都会改画布尺寸。位图尺寸是渲染时定的，之后只靠 CSS
@@ -882,24 +926,73 @@
     return u.name.split('　')[0] + ' · ' + lessonLabel(hit) + '《' + hit.title + '》';
   }
 
+  // 只有手写题才需要"订正"这一步：多音字和默写是程序当场判的，
+  // 对不对孩子当场就知道，不存在"等家长批完再来一遍"这件事。
+  function isRedoable(f) {
+    var k = f.kind || 'w';
+    return k === 'w' || k === 'c' || k === 'z';
+  }
+
+  // 按"是哪个字/词"回题库把原题取回来。
+  //
+  // 不能用反馈里存的那些字段直接当题目：看拼音写词语时，反馈里的 text
+  // 就是正确答案 —— 照着它出题，等于让孩子把答案抄一遍，练的不是"想起来"。
+  // 所以回题库重新取，取到的才是"题目"（拼音或词语本身）。
+  function itemOfFeedback(f) {
+    var units = D.UNITS || [];
+    for (var i = 0; i < units.length; i++) {
+      var list = (f.kind === 'z') ? itemsForZuci(units[i].id, 'all') : itemsForLesson(units[i].id, 'all');
+      for (var j = 0; j < (list || []).length; j++) {
+        var it = list[j];
+        if (it.text !== f.text) continue;
+        // 同一个词在不同课里读音可能不同，拼音对不上就不算同一条
+        if (f.kind !== 'z' && f.py && it.py && it.py !== f.py) continue;
+        return it;
+      }
+    }
+    return null;
+  }
+
   function feedbackCard() {
     var fb = app.state.feedback || [];
     if (!fb.length) return '';
 
-    var rows = fb.map(function (f) {
+    var redoN = fb.filter(function (f) { return !f.isCorrect && isRedoable(f); }).length;
+
+    app._miniReplay = [];
+    var rows = fb.map(function (f, i) {
+      var id = 'fmini-' + i;
+      if (f.strokes && f.strokes.length) {
+        app._miniReplay.push({
+          id: id, strokes: f.strokes, cells: f.cells || f.text.length,
+          grid: gridOf(f), perRow: f.perRow || 0
+        });
+      }
       return '<div class="fb-row">' +
         '<span class="fb-mark ' + (f.isCorrect ? 'ok' : 'bad') + '">' +
         (f.isCorrect ? '✓' : '✗') + '</span>' +
         '<span class="fb-text"><b>' + esc(f.text) + '</b><i>' + esc(f.py) + '</i></span>' +
         (f.note ? '<div class="fb-note">家长说：' + esc(f.note) + '</div>' : '') +
+        // 把"你当时写成了什么样"摆出来。光看一个 ✗，孩子记不起自己哪一写歪了，
+        // 家长那句"崩少了山字头"也就落不到具体的笔画上。
+        (f.strokes && f.strokes.length
+          ? '<div class="ink-label">你写的是这样</div>' + miniCanvasHtml(id, f.cells || f.text.length)
+          : '') +
         '</div>';
     }).join('');
 
     return '<div class="card card-cta">' +
-      '<h2 class="card-title">家长刚批改了 ' + fb.length + ' 条</h2>' +
-      '<p class="card-note">先看批注，想清楚错在哪 —— 再写一遍的时候别照着正确答案描。</p>' +
+      '<h2 class="card-title">家长刚批改了 ' + fb.length + ' 条' +
+      (redoN ? '（写错 ' + redoN + ' 条）' : '') + '</h2>' +
+      '<p class="card-note">先看看自己写成了什么样、再读一遍批注，想清楚错在哪 —— ' +
+      '写第二遍的时候别照着正确答案描，那就变成抄了。</p>' +
       rows +
-      '<button class="btn btn-primary btn-block" data-act="ack-feedback">知道了</button>' +
+      (redoN
+        ? '<button class="btn btn-primary btn-block" data-act="start-redo">' +
+          '把写错的订正一遍（' + redoN + '）</button>'
+        : '') +
+      '<button class="btn ' + (redoN ? 'btn-ghost' : 'btn-primary') +
+      ' btn-block" data-act="ack-feedback">知道了</button>' +
       '</div>';
   }
 
@@ -1220,6 +1313,26 @@
     var parentNote = rec && rec.note
       ? '<div class="fb-note">家长上次说：' + esc(rec.note) + '</div>' : '';
 
+    // 订正这一轮：把"上次写成了什么样"摆在题目旁边。
+    // 空口说"这个字写错了"，孩子想不起自己哪一写歪了；看见了，
+    // 那句批注才落得到具体的笔画上。
+    var prevInk = '';
+    if (app.redo) {
+      var prev = lastInkOf(it);
+      if (prev) {
+        var pid = 'prev-ink';
+        app._miniReplay = [{
+          id: pid, strokes: prev.strokes,
+          cells: prev.cells || it.text.length,
+          grid: gridOf(prev), perRow: prev.perRow || 0
+        }];
+        prevInk = '<div class="prev-ink">' +
+          '<div class="ink-label">你上次写的是这样' +
+          (prev.note ? '（家长说：' + esc(prev.note) + '）' : '') + '</div>' +
+          miniCanvasHtml(pid, prev.cells || it.text.length) + '</div>';
+      }
+    }
+
     return '' +
       '<div class="topbar">' +
       '<button class="btn-icon" data-act="quit" title="退出">✕</button>' +
@@ -1232,6 +1345,7 @@
       (lastAt ? '<span class="when">上次练过 ' + esc(fmtDay(lastAt)) + '</span>' : '') + '</div>' +
       '<div class="stem"><span class="stem-label">' + stemLabel + '</span>' + stemBody + '</div>' +
       parentNote +
+      prevInk +
       '<div class="write-wrap"><canvas id="writeCanvas"></canvas></div>' +
       '<div class="py-hint">' + hint + '</div>' +
       '<p class="card-note">长按某个格子，可只清空并重写那一个字；写点（i、j 的点）不受影响。</p>' +
@@ -1298,7 +1412,7 @@
         '<div class="card">' +
         '<h2 class="card-title">没有待批改的</h2>' +
         '<p class="card-note">孩子写完这里就会出现。最近批过 ' + st.history.length + ' 条。' +
-        (F && F.on() ? '这一页开着的时候会自动找新的（每 20 秒看一眼），不用一直刷新。' : '') +
+        (F && F.on() ? '点下面的「看看有没有新交上来的作业」，孩子刚交的马上就出来。' : '') +
         '</p>' +
         '</div>' +
         (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
@@ -1325,7 +1439,7 @@
       '<div class="topbar"><button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">家长批改</span>' +
       '<span class="topbar-right">待批 ' + queue.length + ' 条</span></div>' +
-      // 自动轮询收到新作业时的那句话（放在最上面，家长一定看得见）
+      // 拉到新作业、或者这条已被别处批过时的那句话（放在最上面，家长一定看得见）
       (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
       (p.dev && F && p.dev !== (F.sync() && F.sync().dev)
         ? '<div class="card card-quiet"><p class="card-note">这一条是「' +
@@ -1333,6 +1447,10 @@
         : '') +
 
       '<div class="card card-q">' +
+      (p.item && p.item.redo
+        ? '<div class="fb-note">这一条是订正 —— 孩子已经重写过一遍，' +
+          '重点看这次改过来没有。</div>'
+        : '') +
       '<div class="stem"><span class="stem-label">题目</span>' + stemTxt + '</div>' +
       '<div class="write-wrap"><canvas id="reviewCanvas"></canvas></div>' +
       '<div class="answer-line">' + (isZ ? '参考答案（家长据此判断）：' : '正确答案：') + '<b>' + ansTxt + '</b></div>' +
@@ -1498,37 +1616,31 @@
     return list.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
   }
 
+  // 批改页（队列空了的时候）的那张收尾卡。
+  //
+  // 以前这里也铺了最近 12 条的清单，跟「查看批改」「练习报告」是第三份几乎一样的
+  // 列表 —— 三份摆在一起，家长分不清哪份才是"全部"。而且这一份**不带笔迹**，
+  // 恰恰丢掉了最该看的东西。
+  // 现在这里只留一句汇总，明细统一交给「查看批改」（那一份带当时的笔迹）。
   function reviewStatsHtml() {
-    var st = app.state;
     var hist = mergedHistory();
     var done = hist.length;
     if (!done) return '';
     var ok = hist.filter(function (h) { return h.isCorrect; }).length;
-
-    // 光给一个百分比不够用：孩子（和家长）真正想知道的是"我哪一句写错了"。
-    // 所以把最近做过的题也列出来，对错标在每一条后面。
-    // 手写题要等家长批改才进 history，所以这里不会混入"还没批"的题。
-    var recent = hist.slice(-12).reverse().map(function (r) {
-      return '<li><b>' + esc(reportItemText(r)) + '</b>　' +
-        (r.isCorrect ? '写对了' : '写错了') +
-        '<span class="when">' + esc(fmtDay(r.ts)) + '</span>' +
-        (r.note ? '<span class="advice">家长批注：' + esc(r.note) + '</span>' : '') + '</li>';
-    }).join('');
-
-    // 一段时间内的批改历史：家长问得最多的是"这两天批了几条、错了哪些"。
-    // 报告页能按 今天 / 7 天 / 30 天 / 全部 切，这里先给一句 7 天的概览和入口。
+    var wrong = done - ok;
+    var last = hist[done - 1];
     var r7 = hist.filter(function (h) { return inRange(h, rangeStart('7')); });
-    var ok7 = r7.filter(function (h) { return h.isCorrect; }).length;
 
     return '<div class="card card-quiet">' +
-      '<h2 class="card-title">做过的情况</h2>' +
+      '<h2 class="card-title">批过的情况</h2>' +
       '<p class="card-note">一共 ' + done + ' 条，写对 ' + ok + ' 条（' +
-      Math.round(ok / done * 100) + '%' +
-      (hist[done - 1].ts ? '，最近一次 ' + esc(fmtDay(hist[done - 1].ts)) : '') + '）。</p>' +
-      '<p class="card-note">最近 7 天批了 ' + r7.length + ' 条' +
-      (r7.length ? ('，写对 ' + ok7 + ' 条（' + Math.round(ok7 / r7.length * 100) + '%）') : '') +
-      '。要按 今天 / 7 天 / 30 天 / 全部 翻更细的记录，去「练习报告」里切换。</p>' +
-      '<ul class="tag-list">' + recent + '</ul>' +
+      Math.round(ok / done * 100) + '%），写错 ' + wrong + ' 条。' +
+      '最近 7 天批了 ' + r7.length + ' 条' +
+      (last && last.ts ? '，最近一次 ' + esc(fmtDay(last.ts)) : '') + '。</p>' +
+      '<p class="card-note">要按 今天 / 7 天 / 30 天 / 全部 翻更细的统计，去「练习报告」。</p>' +
+      // 明细只留一处：这里给带笔迹的那一份，孩子能对着自己当时写的字看错在哪
+      '<button class="btn btn-ghost btn-block" data-act="my-grades">' +
+      '看每一条（带当时写的字）</button>' +
       '</div>';
   }
 
@@ -1542,6 +1654,36 @@
     if (!py) return txt;
     if (String((h && h.key) || '').indexOf('p:') === 0) return txt + '（读 ' + py + '）';
     return txt + '（' + py + '）';
+  }
+
+  // 一条历史记录该用哪种格子回放：组词/看拼音写词语 → 田字格；看词语写拼音 → 拼音格。
+  // 多音字、默写没有笔迹，不会走到这里。
+  function gridOf(h) {
+    if (!h) return 'tian';
+    if (h.kind === 'z') return 'tian';
+    return (h.mode === 'word2py') ? 'pinyin' : 'tian';
+  }
+
+  // 报告/查看批改里回放原始笔迹的小画布。setupCanvas 按容器宽度算格子大小，
+  // 所以给一个固定宽度的容器就行（多字的词格子会小一点，单字会大一点）。
+  function miniCanvasHtml(id, cells) {
+    // 宽度按字数走：四字词的笔迹硬塞进 200px，一格只剩 50px ——
+    // 而"少了一笔""偏旁写歪了"这类错，恰恰是这个尺寸下看不出来的。
+    var w = Math.min(240, Math.max(72, (cells || 1) * 56));
+    return '<div class="mini-ink" style="width:' + w + 'px">' +
+      '<canvas id="' + id + '"></canvas></div>';
+  }
+
+  // render 之后把所有小画布铺开。app._miniReplay 是这次要回放的条目列表，
+  // 每项 { id, strokes, cells, grid, perRow }；没有笔迹的项不列在里面。
+  function setupMiniCanvases() {
+    var list = app._miniReplay || [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      var cv = el(it.id);
+      if (!cv) continue;
+      setupCanvas(cv, it.cells, it.strokes, false, it.grid, it.perRow || 0, false);
+    }
   }
 
   // 「提交批改」：批完不用等队列空就点一下，把攒下的批改结果传给孩子那台设备。
@@ -1558,8 +1700,8 @@
         : '这台设备没开跨设备同步，批改结果只留在这台设备上，孩子在别的设备上看不到。') + '</p>' +
       '<button class="btn btn-primary btn-block" data-act="submit-grades"' +
       (on ? '' : ' disabled') + '>' + (n ? '提交批改（' + n + '）' : '提交批改') + '</button>' +
-      // 孩子刚交上来、家长正等着的场景很常见。这一页开着的时候会自动看（每 20 秒一眼），
-      // 但这个按钮让人不用干等着猜。
+      // 孩子刚交上来、家长正等着的场景很常见。刻意不做定时轮询（见 refreshCloudWork
+      // 上面那段说明），这个按钮让人不用干等着猜。
       '<button class="btn btn-ghost btn-block" data-act="reload-work"' +
       (on ? '' : ' disabled') + '>看看有没有新交上来的作业</button>' +
       '</div>';
@@ -1684,27 +1826,66 @@
     });
 
     var wrong = rangeHist.filter(function (h) { return !h.isCorrect; }).slice(-20).reverse();
+    // 错题是报告里唯一"带原字"的一块：逐条明细整份交给「查看批改」了，
+    // 这里就把笔迹带上 —— 家长一眼能分清是少了一笔、还是整个偏旁写错了。
     var wrongList = wrong.length
-      ? '<ul class="tag-list">' + wrong.map(function (h) {
+      ? '<ul class="tag-list">' + wrong.map(function (h, i) {
+          var wid = 'wmini-' + i;
+          if (h.strokes && h.strokes.length) {
+            app._miniReplay.push({
+              id: wid, strokes: h.strokes, cells: h.cells || h.text.length,
+              grid: gridOf(h), perRow: h.perRow || 0
+            });
+          }
           // 多音字把正确读音一起列出来：家长得知道孩子到底选错了哪个音
           return '<li><b>' + esc(reportItemText(h)) + '</b>' +
             '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
-            (h.note ? '<span class="advice">家长批注：' + esc(h.note) + '</span>' : '') + '</li>';
+            (h.note ? '<span class="advice">家长批注：' + esc(h.note) + '</span>' : '') +
+            (h.strokes && h.strokes.length ? miniCanvasHtml(wid, h.cells || h.text.length) : '') +
+            '</li>';
         }).join('') + '</ul>'
       : (rangeHist.length
         ? '<p class="card-note">这段时间没有错题，挺好。</p>'
-        : '<p class="card-note">这段时间没有批改记录 —— 换「最近 30 天」或「全部」看看。</p>');
+        : '<p class="card-note">这段时间还没有批改记录 —— 换「最近 30 天」或「全部」看看。</p>');
+
+    // 错得最多的字词。家长真正想知道的是"哪个字他老写错"，而不是
+    // "错过的题有哪些"（那种清单下面的错题段已经给了）。
+    // 每个字错过几次在 stats 里一直记着，只是以前没摆出来。
+    var worst = [];
+    Object.keys(app.state.stats || {}).forEach(function (k) {
+      var r = app.state.stats[k];
+      if (r && r.wrongs > 0) worst.push({ k: k, w: r.wrongs, a: r.attempts || 0 });
+    });
+    worst.sort(function (a, b) { return b.w - a.w; });
+    worst = worst.slice(0, 12);
+    var worstHtml = worst.length
+      ? '<ul class="tag-list">' + worst.map(function (r) {
+          var t = String(r.k);
+          var at = t.indexOf(':');
+          if (at >= 0) t = t.slice(at + 1);
+          return '<li><b>' + esc(t) + '</b>　错过 ' + r.w + ' 次（练过 ' + r.a + ' 次）</li>';
+        }).join('') + '</ul>'
+      : '<p class="card-note">还没有反复写错的字，挺好。</p>';
 
     // 批改的全部内容：批的是哪一条、批成对还是错、家长写了什么批注、哪天批的。
-    // 家长最关心的就是这一份 —— 只给一个正确率，看不出"我上次提醒他什么、改了没有"。
+    // 这一段是**按时间段筛**的（今天 / 7 天 / 30 天 / 全部），
+    // 「查看批改」那边是"最近 40 条"、不按时间段 —— 两边各有各的用处，所以都留着。
     var graded = rangeHist.slice(-60).reverse();
-    var gradedRows = graded.map(function (h) {
+    var gradedRows = graded.map(function (h, i) {
+      var id = 'gmini-' + i;
+      if (h.strokes && h.strokes.length) {
+        app._miniReplay.push({
+          id: id, strokes: h.strokes, cells: h.cells || h.text.length,
+          grid: gridOf(h), perRow: h.perRow || 0
+        });
+      }
       return '<div class="fb-row">' +
         '<span class="fb-mark ' + (h.isCorrect ? 'ok' : 'bad') + '">' + (h.isCorrect ? '✓' : '✗') + '</span>' +
         '<span class="fb-text"><b>' + esc(h.text) + '</b>' +
         (h.py ? '<i>' + esc(h.py) + '</i>' : '') + '</span>' +
         '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
         (h.note ? '<div class="fb-note">家长批注：' + esc(h.note) + '</div>' : '') +
+        (h.strokes && h.strokes.length ? miniCanvasHtml(id, h.cells || h.text.length) : '') +
         '</div>';
     }).join('') || '<p class="card-note">这段时间没有批改记录 —— 换「最近 30 天」或「全部」看看。</p>';
 
@@ -1729,8 +1910,12 @@
       '<div class="card"><h2 class="card-title">按题型</h2>' + byKind + '</div>' +
       '<div class="card"><h2 class="card-title">按单元</h2>' + byUnit + '</div>' +
       '<div class="card"><h2 class="card-title">批改记录（' + rangeTxt + '，' + graded.length + ' 条）</h2>' +
-      '<p class="card-note">批过的每一条都在这里：批成对还是错、家长的批注、批改的日期。' +
-      '带拼音的是「看词语写拼音」那一档。</p>' + gradedRows + '</div>' +
+      '<p class="card-note">批过的每一条都在这里：批成对还是错、家长的批注、批改的日期，' +
+      '还带着孩子当时写的字。带拼音的是「看词语写拼音」那一档。</p>' + gradedRows + '</div>' +
+      '<div class="card"><h2 class="card-title">错得最多的字词</h2>' +
+      '<p class="card-note">按"错过几次"排的。写错的字当天就会回到练习里（当天到期，' +
+      '排在最前面），不用手动挑 —— 这一段只是让你一眼看出哪几个字是老大难。</p>' +
+      worstHtml + '</div>' +
       '<div class="card"><h2 class="card-title">错题（' + rangeTxt + '，最多 20 条）</h2>' +
       '<p class="card-note">后面那句是家长批改时写的批注。</p>' + wrongList + '</div>';
   }
@@ -1743,10 +1928,15 @@
       // 报告页只放报告。以前这儿还挂在"跨设备同步"和"别的设备上"两张卡上，
       // 家长看报告时被设置项挡在中间 —— 同步挪回它自己那一页。
       '<div class="card card-quiet">' +
-      '<p class="card-note">报告里包含练习和批改的全部内容。要在自己手机上看，' +
-      '去「跨设备同步」填上同一个家庭码（一个码管语文和数学）。</p>' +
+      '<p class="card-note">这一页是统计。要看"哪一次批的是对是错、家长当时写了什么批注"，' +
+      '去「查看批改」。</p>' +
+      '<p class="card-note">注：孩子写的原字只存在他自己那台设备上（订正和历史回看都在那儿翻，' +
+      '一点不缺）。所以在这台手机的报告里看不到原字 —— 但**批改的时候是看得到的**，' +
+      '那才是要看着字判分的地方。</p>' +
+      '<button class="btn btn-ghost btn-block" data-act="my-grades">' +
+      '看每一条（带当时写的字）</button>' +
       '<button class="btn btn-ghost btn-block" data-act="sync">跨设备同步设置</button>' +
-      // 这一页开着的时候会自动看（每 30 秒），也给一个手动入口
+      // 不做定时轮询，给一个手动入口（原因见 refreshCloudWork 上面那段说明）
       '<button class="btn btn-ghost btn-block" data-act="reload-report">刷新（看看有没有新数据）</button>' +
       '</div>' +
       reportBodyHtml() +
@@ -1775,13 +1965,23 @@
     }
 
     var wrong = hist.filter(function (h) { return !h.isCorrect; }).length;
-    var rows = hist.slice(0, 40).map(function (h) {
+    // 查看批改也要回放原始笔迹，孩子能对照着看自己哪里写错了
+    app._miniReplay = [];
+    var rows = hist.slice(0, 40).map(function (h, i) {
+      var id = 'mmini-' + i;
+      if (h.strokes && h.strokes.length) {
+        app._miniReplay.push({
+          id: id, strokes: h.strokes, cells: h.cells || h.text.length,
+          grid: gridOf(h), perRow: h.perRow || 0
+        });
+      }
       return '<div class="fb-row">' +
         '<span class="fb-mark ' + (h.isCorrect ? 'ok' : 'bad') + '">' + (h.isCorrect ? '✓' : '✗') + '</span>' +
         '<span class="fb-text"><b>' + esc(h.text) + '</b>' +
         (h.py ? '<i>' + esc(h.py) + '</i>' : '') + '</span>' +
         '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
         (h.note ? '<div class="fb-note">家长批注：' + esc(h.note) + '</div>' : '') +
+        (h.strokes && h.strokes.length ? miniCanvasHtml(id, h.cells || h.text.length) : '') +
         '</div>';
     }).join('');
 
@@ -1790,6 +1990,12 @@
       '<h2 class="card-title">最近批改的 ' + Math.min(40, hist.length) + ' 条</h2>' +
       '<p class="card-note">批过 ' + hist.length + ' 条，其中写错 ' + wrong + ' 条。' +
       '写错的今天还会再出现一次，趁热重写一遍。</p>' +
+      // 一台笔迹都没有，说明这些记录是从别的设备同步过来的统计
+      // （笔迹只留在产出它的那台设备上）。不说清楚，家长会以为笔迹功能坏了。
+      (hist.length && !hist.some(function (h) { return h.strokes && h.strokes.length; })
+        ? '<p class="card-note">孩子写的原字只存在他自己那台设备上 —— 这里是从那边' +
+          '同步过来的记录。要看原字，去他那台设备上翻（批改的时候是看得到的）。</p>'
+        : '') +
       rows +
       '</div>';
   }
@@ -1814,11 +2020,27 @@
 
   // 统计快照：覆盖写，云端只留每台设备的最新一份。
   // 全量历史就在孩子设备上（history 上限 2000 条），没必要再往云端堆一份。
+  // 云端请求有 256KB 上限，笔迹只带最近 50 条的 —— 更早的在家长手机上看
+  // 不到原字，但统计、批注、对错都还在。
+  // 统计快照**不带笔迹** —— 这是按用途分开的，不是偷懒：
+  //
+  //   批改：家长要看着孩子真实写的字判分 → 走 work 流，笔迹必须传（那是判分的依据）
+  //   订正 / 历史报告：都是在孩子自己那台设备上翻的，读本机就行 ——
+  //                    本机存的是原始笔迹，一个点都没丢
+  //
+  // 云端那一个文件要压在 1MB 以内（超过 GitHub 就不返回内容，全家都读不到），
+  // 少带一份笔迹，就能多装几十条待批改的作业 —— 那才是真正卡脖子的地方。
   function reportSnapshot() {
+    var hist = (app.state.history || []).slice(-200);
+    var slim = hist.map(function (h) {
+      var c = {};
+      for (var k in h) if (h.hasOwnProperty(k) && k !== 'strokes') c[k] = h[k];
+      return c;
+    });
     return {
       devName: (F && F.sync() && F.sync().name) || '设备',
       ts: Date.now(),
-      history: (app.state.history || []).slice(-200),
+      history: slim,
       stats: app.state.stats || {}
     };
   }
@@ -1868,8 +2090,8 @@
   //
   // 两个开关分得很细，都是为了"别打断正在批改的家长"：
   // - manual：家长自己点的「看看有没有新作业」。没变化也要给一句话，否则像按钮坏了。
-  // - 自动轮询（announce）：**内容没变就一个字都不重绘** —— 家长可能正往批注框里打字，
-  //   重绘会把刚写的字清掉、焦点也丢了。
+  // - 手动点「看看有没有新作业」（announce）：**内容没变就一个字都不重绘** ——
+  //   家长可能正往批注框里打字，重绘会把刚写的字清掉、焦点也丢了。
   function refreshCloudWork(opts) {
     if (!F || !F.on()) return;
     var prevList = app.cloudWork || [];
@@ -2013,6 +2235,55 @@
     render();
   }
 
+  // 这个字/词最近一次"写了、并且留下笔迹"的记录 —— 订正时要摆出来给孩子对照。
+  function lastInkOf(it) {
+    var k = keyOf(it);
+    var hist = app.state.history || [];
+    for (var i = hist.length - 1; i >= 0; i--) {
+      if (hist[i].key === k && hist[i].strokes && hist[i].strokes.length) return hist[i];
+    }
+    return null;
+  }
+
+  // 订正：把这一批改里写错的，单独开一轮重做。
+  //
+  // 为什么单独开一轮，而不是靠"错题当天到期"自动回到练习里：
+  // 到期那一轮还掺着别的到期字词，而家长刚批完的这份批注是最新的、
+  // 上下文最完整的 —— 趁热订正效果最好，隔几天他早忘了自己当时怎么写的。
+  //
+  // 这一轮里摆出来的是"你上次写成了什么样"和家长的批注，**不摆正确答案**：
+  // 先看清楚错在哪一笔，再凭记忆写一遍，这才是订正；照着描只是抄。
+  function startRedo() {
+    var fb = app.state.feedback || [];
+    var seen = {};
+    var session = [];
+    fb.forEach(function (f) {
+      if (f.isCorrect || !isRedoable(f)) return;
+      var k = f.text + '|' + (f.py || '');
+      if (seen[k]) return;
+      var it = itemOfFeedback(f);
+      if (!it) return;
+      seen[k] = 1;
+      session.push(it);
+    });
+    if (!session.length) {
+      app.message = '这次没有要订正的手写题（多音字和默写当场就判过，不用再写一遍）。';
+      return render();
+    }
+    app.session = session;
+    app.cursor = 0;
+    app.strokes = [];
+    app.typed = '';
+    app.roundOk = 0;
+    app.roundTotal = 0;
+    app.message = '';
+    app.submitMsg = '';
+    app.redo = true;
+    app.view = 'practice';
+    saveDraft('write');
+    render();
+  }
+
   /* --------------------------- 提交（上传到云端） --------------------------- */
   // 「提交给家长批改」：这是**唯一**会把作业传上去的动作，点一下就传。
   // 传的是待批改队列里的全部（写多少传多少）；不点就一直留在本机 ——
@@ -2037,7 +2308,14 @@
     F.markWorkDirty();
     F.flushWork().then(function (r) {
       if (r && r.ok) {
-        app.submitMsg = '已提交 ' + n + ' 条。家长在另一台设备上打开就能批改了。';
+        // 云端装不下的那部分不能只说一句"已提交"就算完 —— 家长会以为全收到了，
+        // 结果看不到几条，还以为是自己点错了。
+        var full = (r && r.full) || 0;
+        app.submitMsg = '已提交 ' + (n - full) + ' 条。家长在另一台设备上打开就能批改了。'
+          + (full
+            ? '还有 ' + full + ' 条排队的太长，云端一次装不下 —— 让家长先批掉这批，' +
+              '再点一次「提交给家长批改」就能把剩下的带上去（那些还好好留在这台设备上）。'
+            : '');
         // 顺带把统计快照也推上去 —— 家长在自己手机上打开报告，那些数字才不是空的
         F.pushReport(reportSnapshot());
       } else {
@@ -2161,7 +2439,10 @@
         // 单元在"写"的这一刻就钉死。批改往往是几天以后，那时候家长可能
         // 已经把单元切到别处 —— 再拿当前的 unit 记账，统计就串到别的单元去了。
         unit: itUnit,
-        no: it.no
+        no: it.no,
+        // 这一条是订正（孩子已经重写过一遍）。家长批的时候看得到，
+        // 可以顺手确认"这次改过来了没有"。
+        redo: app.redo ? 1 : 0
       },
       strokes: cleanStrokes(app.strokes)
     });
@@ -2178,6 +2459,13 @@
       app.view = 'home';
       app.session = null;
       clearDraft();
+      // 订正做完了，这一轮的反馈就翻篇。不然首页一直挂着
+      // "家长刚批改了 N 条"，孩子天天看见，反而把它当成背景。
+      if (app.redo) {
+        app.redo = false;
+        app.state.feedback = [];
+        saveState();
+      }
     } else {
       // 没写完：记下"做到第几题、这题写到哪儿了"，下次接着写
       saveDraft('write');
@@ -2190,7 +2478,7 @@
   // 家长批改（手写题）和程序自动判分（多音字 / 默写）走的是同一套，
   // 复习节奏才不会出现两套标准 —— 否则"错一次"在两种题型里含义不同，
   // 到期排队就乱了。
-  function recordResult(item, isCorrect, note) {
+  function recordResult(item, isCorrect, note, strokes) {
     var k = keyOf(item);
     var r = app.state.stats[k] || { attempts: 0, corrects: 0, wrongs: 0, level: 0 };
 
@@ -2211,15 +2499,19 @@
     if (note) r.note = note;
     app.state.stats[k] = r;
 
-    app.state.history.push({
+    // 存下原始笔迹：报告里要能回放"当时写的是什么"，光看汉字和拼音
+    // 想不起错在哪一笔。多音字 / 默写没有笔迹，strokes 为空就不存。
+    var rec = {
       ts: Date.now(), key: k, text: item.text, py: item.py || '',
       isCorrect: !!isCorrect, note: note || '',
-      // 记下单元：报告要按单元分开统计，光有 key 反查不出来是哪一课的
       unit: item.unit || app.state.unit || '',
-      // 记下练习模式：报告里要能说出这条是"看拼音写词语"还是"看词语写拼音"
-      // （写拼音那一档只看汉字是看不出来的）
-      mode: item.mode || ''
-    });
+      mode: item.mode || '',
+      kind: item.kind || '',
+      cells: item.cells || (item.text ? item.text.length : 0),
+      perRow: item.perRow || 0
+    };
+    if (strokes && strokes.length) rec.strokes = strokes;
+    app.state.history.push(rec);
     if (app.state.history.length > 2000) {
       app.state.history = app.state.history.slice(-2000);
     }
@@ -2249,14 +2541,18 @@
   // 本地批和"家长在别的设备上批完传回来"走的是同一条路 —— 规则分叉就会出现
   // "错一次"在两种题型/两种来源里含义不同，复习排期立刻乱掉。
   function applyResult(p, isCorrect, note) {
-    recordResult(p.item, isCorrect, note);
+    recordResult(p.item, isCorrect, note, p.strokes);
 
     // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
-    // 家长那句批注也就失去了上下文。
-    app.state.feedback.push({
+    // 家长那句批注也就失去了上下文。带上笔迹，孩子能对照着看自己哪里写错了。
+    var fb = {
       ts: Date.now(), key: keyOf(p.item), text: p.item.text, py: p.item.py,
-      isCorrect: !!isCorrect, note: note || ''
-    });
+      isCorrect: !!isCorrect, note: note || '',
+      kind: p.item.kind || '', cells: p.item.cells || (p.item.text ? p.item.text.length : 0),
+      perRow: p.item.perRow || 0, mode: p.item.mode || ''
+    };
+    if (p.strokes && p.strokes.length) fb.strokes = p.strokes;
+    app.state.feedback.push(fb);
     // 家长连着批几十条时，这一堆"还没给孩子看"的也会一直涨。
     // 孩子一次看得过来的就最近那些，留个上限就够了（history 那边同理）。
     if (app.state.feedback.length > 60) {
@@ -2343,6 +2639,9 @@
       app.afterUnlock = '';
     }
     var root = el('app');
+    // 每次渲染都把"待回放的小画布"清空：列表由各自的视图函数重新填。
+    // 不清的话，上一页留下的条目会被画到这一页上（比如从报告页退回首页）。
+    app._miniReplay = [];
     var html = app.view === 'practice' ? viewPractice()
       : app.view === 'done' ? viewDone()
         : app.view === 'report' ? viewReport()
@@ -2380,6 +2679,11 @@
         // 笔迹是按格子存的，所以在这台设备（屏宽可能不一样）上回放仍然对得上格子
         setupCanvas(el('reviewCanvas'), pN, p0.strokes, false, pGrid, pCols);
       }
+    }
+    // 铺开小画布、回放原始笔迹：首页的批改反馈、练习报告、查看批改、
+    // 订正轮次都在用同一套。列表由各自的视图函数填好，这里只负责铺。
+    if (app._miniReplay && app._miniReplay.length) {
+      setupMiniCanvases();
     }
     // 只在"换了页面"或"做到下一题"时才回到顶部。
     //
@@ -2485,6 +2789,7 @@
       refreshGrades();   // 进来看一眼家长有没有新批的（只拉取，不上传）
       return render();
     }
+    if (act === 'start-redo') return startRedo();
     if (act === 'resume') return resumeDraft();
     if (act === 'drop-draft') { clearDraft(); app.message = ''; return render(); }
     if (act === 'ref') { app.view = 'ref'; return render(); }
@@ -2494,6 +2799,9 @@
       if (!app.parentUnlocked) {
         app.view = 'parent';
         app.passInput = '';
+        // 口令一过就直奔报告页。少了这一句，家长输完口令会停在「家长批改」上，
+        // 看到的全是批改队列和"做过的情况"，还以为练习报告就是这些内容。
+        app.afterUnlock = 'report';
         app.message = '练习报告也要口令 —— 里面有正确答案，别让孩子照着抄。';
         return render();
       }
@@ -2537,12 +2845,20 @@
       app.message = '';        // 别把"口令要 4～6 位数字"那句带进批改页
       saveState();
       refreshCloudWork();
+      // 从首页点进来的几个入口，口令一过就直奔目的地 ——
+      // 少了这一步，家长会停在「家长批改」页上，以为自己点错了。
       if (app.afterUnlock === 'sync') {   // 从首页「跨设备同步」进来的，直奔同步页
         app.afterUnlock = '';
         app.view = 'sync';
         app.famInput = '';
         app.message = '';
         refreshReports();
+      } else if (app.afterUnlock === 'report') {   // 从首页「练习报告」进来的
+        app.afterUnlock = '';
+        app.view = 'report';
+        app.message = '';
+        refreshReports();
+        refreshGrades();
       }
       return render();
     }
@@ -2560,6 +2876,12 @@
         app.famInput = '';
         app.message = '';
         refreshReports();
+      } else if (app.afterUnlock === 'report') {
+        app.afterUnlock = '';
+        app.view = 'report';
+        app.message = '';
+        refreshReports();
+        refreshGrades();
       }
       return render();
     }

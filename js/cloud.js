@@ -152,6 +152,59 @@
 
   /* ------------------------------ 作业流（孩子端写） ------------------------------ */
 
+  // 上传前先把笔迹抽稀。
+  //
+  // 为什么非抽不可：getCoalescedEvents 会把浏览器攒下的每个硬件采样点都交出来，
+  // 相邻两点常常只差零点几个像素 —— 回放时根本看不出来，却让请求体和云端
+  // 那一份 JSON 白白胖一圈。队列攒到一百多条时，这一圈就是"几百 KB"和"200KB"的差别：
+  // 云函数请求体上限 256KB；云端单文件超过 1MB 还会让 GitHub 干脆不返回内容
+  // （那时候全家所有设备都同步不了，比"传不上去"严重得多）。
+  //
+  // 只作用于"要传上去的那份副本"：本机存的笔迹原样不动，回放质量不受影响。
+  // 参数是算出来的，不是拍的：一个家庭一个云端文件，而 GitHub 对超过 1MB 的文件
+  // 干脆不返回内容，所以那个文件必须稳在 700KB 以内。按"一条两字词、每字 10 笔"估，
+  // 每笔留 12 个点时一条约 5KB，一百多条排队的队列正好装得下，回放也还认得出字形。
+  var MIN_PT_DIST = 0.02;       // 格宽的 2%（约 2px），比这更密的点回放时看不出来
+  var MAX_PTS_PER_STROKE = 12;  // 单笔最多留这么多点，一笔的形状还在
+
+  function thinPts(pts) {
+    var list = Array.isArray(pts) ? pts : [];
+    if (list.length <= 2) return list.slice();
+
+    var out = [list[0]];
+    for (var i = 1; i < list.length - 1; i++) {
+      var b = list[i];
+      if (!b || typeof b.u !== 'number' || typeof b.v !== 'number') continue;
+      var a = out[out.length - 1];
+      if (Math.abs(b.u - a.u) + Math.abs(b.v - a.v) >= MIN_PT_DIST) out.push(b);
+    }
+    out.push(list[list.length - 1]);
+
+    // 抽过一轮还是太多（一笔写得很慢、采样特别密），就等距再抽一次
+    if (out.length > MAX_PTS_PER_STROKE) {
+      var step = out.length / MAX_PTS_PER_STROKE, thin = [];
+      for (var j = 0; j < MAX_PTS_PER_STROKE - 1; j++) thin.push(out[Math.floor(j * step)]);
+      thin.push(out[out.length - 1]);
+      out = thin;
+    }
+    return out;
+  }
+
+  // 给报告快照也留个入口：家长在自己手机上看报告时，那份笔迹同样要瘦过身
+  function thinStrokes(strokes) {
+    return (strokes || []).map(function (st) {
+      return { cell: st.cell, pts: thinPts(st.pts) };
+    });
+  }
+
+  // 一条作业瘦身后大概多少字节 —— 只用来切批，不要求精确
+  var BATCH_MAX_ITEMS = 10;
+  var BATCH_MAX_BYTES = 80 * 1024;   // 云函数请求体 256KB 上限，切批时留足余量
+
+  function sizeOf(o) {
+    try { return JSON.stringify(o).length; } catch (e) { return 4096; }
+  }
+
   // 写完一条：只在本机记一笔"有待传的"，不发请求。
   //
   // 为什么不做"写一个传一个"、也不做 30 秒节流窗口：
@@ -172,15 +225,18 @@
         unit: p.unit || '',
         devName: s.name || '',
         item: p.item,
-        strokes: (p.strokes || []).map(function (st) {
-          return { cell: st.cell, pts: st.pts };
-        })
+        strokes: thinStrokes(p.strokes)
       };
     });
     return { action: 'work.push', fam: s.fam, dev: s.dev, items: items };
   }
 
   // 一整轮写完（或者点了「提交给家长批改」）时才真的发这一次。
+  //
+  // 队列可能攒了一百多条、每条又带着笔迹，一个请求装不下（云函数请求体 256KB）。
+  // 所以这里按体积切成几批顺序发：第一批照旧"整份覆盖"（本地队列是权威），
+  // 后面的批带 append 往上垒 —— 几批的并集正好是完整的队列，结果和一次发完一样，
+  // 只是分成了几个请求。
   //
   // 返回 { ok }: 界面上那个提交按钮要照着说一句实话 ——
   // "已提交"和"没传上去"对家长是两件完全不同的事。老调用方不看返回值，照旧。
@@ -189,14 +245,49 @@
     var s = sync();
     if (!s.dirty) return Promise.resolve({ ok: true, skipped: true });   // 没有新写的，就别白跑一趟
     s.dirty = false;
-    return post(workPayload()).then(function (data) {
+
+    var all = workPayload().items;
+    if (!all.length) return Promise.resolve({ ok: true, skipped: true });
+
+    var batches = [];
+    var cur = [], curBytes = 0;
+    all.forEach(function (it) {
+      var n = sizeOf(it);
+      if (cur.length && (cur.length >= BATCH_MAX_ITEMS || curBytes + n > BATCH_MAX_BYTES)) {
+        batches.push(cur);
+        cur = [];
+        curBytes = 0;
+      }
+      cur.push(it);
+      curBytes += n;
+    });
+    if (cur.length) batches.push(cur);
+
+    var grades = [];
+    var full = 0;   // 云端装不下、还留在本机的条数
+    var chain = Promise.resolve();
+    batches.forEach(function (batch, i) {
+      chain = chain.then(function () {
+        var body = { action: 'work.push', fam: s.fam, dev: s.dev, items: batch };
+        // 第一批不带 append（整份覆盖），后面几批往上垒
+        if (i > 0) body.append = true;
+        return post(body).then(function (data) {
+          // 搭车带回来的批改结果：孩子端不用再单独发一次请求
+          if (data && data.grades && data.grades.length) grades = grades.concat(data.grades);
+          // 云端说"装不下了"的条数。每批各报各的，要累加 ——
+          // 空间是逐批消耗掉的，后面的批可能整批都塞不进去。
+          if (data && typeof data.full === 'number') full += data.full;
+        });
+      });
+    });
+
+    return chain.then(function () {
       lastError = '';
-      // 搭车带回来的批改结果：孩子端不用再单独发一次请求
-      if (data.grades && data.grades.length && hooks.applyGrades) hooks.applyGrades(data.grades);
+      if (grades.length && hooks.applyGrades) hooks.applyGrades(grades);
       if (hooks.onStatus) hooks.onStatus();
-      return { ok: true, data: data };
+      return { ok: true, count: all.length, batches: batches.length, full: full };
     }).catch(function (e) {
-      s.dirty = true;   // 没传上去，下次联网再补
+      s.dirty = true;   // 没传上去，下次联网再补（重发会从第一批重新覆盖，不会留半截）
       note(e);
       return { ok: false, error: lastError };
     });
@@ -355,6 +446,7 @@
     statusText: statusText,
     markWorkDirty: markWorkDirty,
     flushWork: flushWork,
+    thinStrokes: thinStrokes,
     queueGrade: queueGrade,
     flushGrades: flushGrades,
     pendingGrades: pendingGrades,
