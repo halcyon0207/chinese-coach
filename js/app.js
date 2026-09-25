@@ -57,11 +57,63 @@
     roundOk: 0,
     roundTotal: 0,
     message: '',
+    // 「提交给家长批改」的结果提示（成功 / 没开同步 / 没传上去）。
+    // 单独一个字段，不复用 message：message 会跟着换题被清掉，
+    // 而"交上去了"这句得留在页面上让家长看见。
+    submitMsg: '',
+    // 报告里"看哪一段时间"（今天 / 最近 7 天 / 最近 30 天 / 全部）。
+    // 家长的用法是"看看这几天批了什么"，所以默认最近 7 天。
+    range: '7',
     // 存不进去时给家长看的一句话，见 saveState()
     storageWarn: ''
   };
 
   function el(id) { return document.getElementById(id); }
+
+  /* ------------------------------ 日期 ------------------------------ */
+  // 只精确到"天"。孩子要知道的是"这个字我哪天练过"，
+  // 具体到几分几秒对他没有意义，反而把界面撑得很吵。
+  function fmtDay(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var n = new Date();
+    function same(x, y) {
+      return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+    }
+    if (same(d, n)) return '今天';
+    var y1 = new Date(n.getTime() - 24 * 60 * 60 * 1000);
+    if (same(d, y1)) return '昨天';
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  }
+
+  // 按钮角标用的短日期。课时按钮上挂"9月24日"会把按钮撑得很长，
+  // 缩成 9/24，一行还能排下两三个。
+  function fmtDayShort(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  }
+
+  // 这一条练习内容最后一次是什么时候练的（拍过、批过都算）。
+  function lastAtOf(item) {
+    var r = (app.state.stats || {})[keyOf(item)];
+    return (r && r.lastAt) || 0;
+  }
+
+  // 一组题里最近的那次练习日期。首页课时按钮上用它标"哪天练过"。
+  function lastAtOfItems(list) {
+    var at = 0;
+    (list || []).forEach(function (it) {
+      var t = lastAtOf(it);
+      if (t > at) at = t;
+    });
+    return at;
+  }
+
+  function unitNameOf(id) {
+    var u = D.byId(id || '');
+    return u ? u.name.split('　')[0] : '';
+  }
 
   // 保存必须看结果。隐私模式、空间满、被沙箱拦住时 setItem 会抛，
   // 只 console.warn 的表现就是"写了一晚上，下次打开全没了"，家长查都查不出来。
@@ -851,6 +903,85 @@
       '</div>';
   }
 
+  /* ====================== 未写完的那一轮（断点续练） ====================== */
+  // 练习被打断（关掉页面、切到别的 App、平板没电）是常态：一轮几十条字词，
+  // 孩子很少一次写得完。以前下次进来是从头组一套新题 —— 写过的白写，
+  // 没写的也不会补上，等于每天只在练前十个字。
+  //
+  // 所以把"整份题目 + 做到第几题 + 当前这题的笔迹"一起存在本机。
+  // 存整份题目而不是只存进度，是因为题目带随机排序（orderByDue），
+  // 照当前数据重排一次就是另一套题了。
+  function saveDraft(kind) {
+    if (!app.session || !app.session.length) return;
+    app.state.draft = {
+      kind: kind || 'write',        // write=手写题 / typed=程序判分题
+      ts: Date.now(),
+      unit: app.state.unit,
+      lesson: app.state.lesson,
+      itemMode: app.state.mode,
+      cursor: app.cursor,
+      typed: app.typed || '',
+      roundOk: app.roundOk || 0,
+      roundTotal: app.roundTotal || 0,
+      strokes: cleanStrokes(app.strokes),
+      session: app.session
+    };
+    saveState();
+  }
+
+  function clearDraft() {
+    if (!app.state.draft) return;
+    app.state.draft = null;
+    saveState();
+  }
+
+  // 接着上次没写完的继续。已经写过的条目不在 session 里重复出现，
+  // 所以不会把同一个字算两遍。
+  function resumeDraft() {
+    var d = app.state.draft;
+    if (!d || !Array.isArray(d.session) || !d.session.length) {
+      app.state.draft = null;
+      app.message = '上次那一轮已经没有了，重新开始一轮吧。';
+      return render();
+    }
+    app.session = d.session;
+    app.cursor = Math.min(Math.max(0, d.cursor || 0), d.session.length - 1);
+    app.strokes = d.strokes || [];
+    app.typed = d.typed || '';
+    app.roundOk = d.roundOk || 0;
+    app.roundTotal = d.roundTotal || 0;
+    // 单元 / 课时 / 练习模式一起还原：报告里按单元统计要用，
+    // 界面上那句"练的是哪一课"也得对得上。
+    app.state.unit = d.unit || app.state.unit;
+    app.state.lesson = d.lesson || app.state.lesson;
+    app.state.mode = d.itemMode || app.state.mode;
+    app.message = '';
+    app.submitMsg = '';
+    app.view = 'practice';
+    saveState();
+    render();
+  }
+
+  function draftCard() {
+    var d = app.state.draft;
+    if (!d || !Array.isArray(d.session) || !d.session.length) return '';
+    var at = d.cursor || 0;
+    if (at >= d.session.length) return '';
+    var it = d.session[at] || {};
+    var kindName = KIND_NAME[String(it.kind || '')] || '练习';
+    var scope = [unitNameOf(d.unit), (d.lesson && d.lesson !== 'all') ? ('第 ' + d.lesson + ' 课') : '']
+      .filter(Boolean).join(' · ');
+    return '<div class="card card-due">' +
+      '<h2 class="card-title">上次还没写完</h2>' +
+      '<p class="card-note">' + (scope ? esc(scope) + ' · ' : '') + esc(kindName) +
+      '，做到第 ' + (at + 1) + ' 题（共 ' + d.session.length + ' 题），' + esc(fmtDay(d.ts)) + '。' +
+      '接着写 —— 已经写过的那几条不会再出现，也不会重算。</p>' +
+      '<div class="action-row">' +
+      '<button class="btn btn-soft" data-act="drop-draft">不用了</button>' +
+      '<button class="btn btn-primary" data-act="resume">继续写</button>' +
+      '</div></div>';
+  }
+
   // 首页的「今天该复习」：把到期的摆出来，再给一个"只练这些"的入口。
   //
   // 这是间隔复习唯一能被孩子看见的地方 —— 报告里那句"今天到期该复习 N 个"
@@ -872,6 +1003,7 @@
   function viewHome() {
     var st = app.state;
     var pending = st.pending.length;
+    var graded = (st.history || []).length;
     var unit = st.unit;
     var lesson = st.lesson || 'all';
 
@@ -891,15 +1023,20 @@
       lessonBtns = '<button class="unit-btn' + (lesson === 'all' ? ' on' : '') +
         '" data-act="lesson" data-l="all">整个单元</button>' +
         cur.lessons.map(function (ln) {
-          var n = itemsForLesson(unit, ln.no).length;
+          var items = itemsForLesson(unit, ln.no);
+          var n = items.length;
           var label = lessonLabel(ln) + '《' + ln.title + '》';
           if (!n) {
             return '<span class="lesson-off">' + esc(label) +
               '（' + (ln.star ? '略读课文，无字词' : '本课没有字词') + '）</span>';
           }
+          // 练过的那一课标上"最后一次是哪天"：孩子一眼能看出哪几课动过、
+          // 哪几课还一次没碰，不用去翻记录。
+          var at = lastAtOfItems(items);
           return '<button class="unit-btn' + (String(lesson) === String(ln.no) ? ' on' : '') +
             '" data-act="lesson" data-l="' + esc(ln.no) + '">' +
-            esc(label) + '（' + n + '）</button>';
+            esc(label) + '（' + n + '）' +
+            (at ? '<span class="when">' + esc(fmtDayShort(at)) + '</span>' : '') + '</button>';
         }).join('');
     }
 
@@ -912,6 +1049,8 @@
       '</div>' +
 
       feedbackCard() +
+
+      draftCard() +
 
       dueCard() +
 
@@ -947,8 +1086,11 @@
 
       '<div class="card card-quiet">' +
       '<h2 class="card-title">资料</h2>' +
-      '<p class="card-note">只读查阅：二类字（识字表）、多音字、易错字。</p>' +
+      '<p class="card-note">只读查阅：二类字（识字表）、多音字、易错字；批改过的也在这里翻。</p>' +
       '<button class="btn btn-ghost btn-block" data-act="ref">二类字 / 多音字 / 易错字</button>' +
+      // 家长批过的东西得随时能翻回来看 —— 首页给一个入口，练习页里也有一个
+      '<button class="btn btn-ghost btn-block" data-act="my-grades">查看批改' +
+      (graded ? '（' + graded + ' 条）' : '') + '</button>' +
       '</div>' +
 
       '<div class="card">' +
@@ -964,15 +1106,20 @@
 
       '<div class="card card-quiet">' +
       '<h2 class="card-title">家长</h2>' +
-      '<button class="btn btn-ghost btn-block" data-act="parent">家长批改' +
-      (pending ? '（' + pending + ' 条待批）' : '') + '</button>' +
-      '<button class="btn btn-ghost btn-block" data-act="report">练习报告（家长 · 需口令）</button>' +
-      // 家庭码以前只藏在报告页最底下，家长翻半天也找不着。
-      // 单独给一个入口，和报告一样要口令（家庭码等于全家的钥匙）。
-      '<button class="btn btn-ghost btn-block" data-act="sync">跨设备同步（家庭码 · 需口令）</button>' +
+      // 家长一进来最常做两件事：批改、看报告。这两个排一行，
+      // 家庭码（配一次就基本不动）收成下面一行的小按钮。
+      '<div class="parent-row">' +
+      '<button class="btn btn-soft" data-act="parent">家长批改' +
+      (pending ? '（' + pending + '）' : '') + '</button>' +
+      '<button class="btn btn-soft" data-act="report">练习报告</button>' +
+      '</div>' +
+      '<div class="parent-row">' +
+      '<button class="btn btn-ghost" data-act="sync">跨设备同步</button>' +
+      '</div>' +
+      '<p class="card-note">都要家长口令。报告里有练习和批改的全部内容。</p>' +
       '</div>' +
 
-      '<p class="footnote">数据只保存在这台设备上，不会上传。</p>';
+      '<p class="footnote">不填家庭码时，数据只保存在这台设备上。</p>';
   }
 
   /* ============================== 视图：练习 ============================== */
@@ -1003,6 +1150,7 @@
       body +
       (note ? '<p class="card-note">' + esc(note) + '</p>' : '') +
       (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
+      '<button class="btn btn-ghost btn-block" data-act="my-grades">查看批改</button>' +
       '</div>';
   }
 
@@ -1046,6 +1194,8 @@
     var n = isZ ? it.cells : it.text.length;
     var total = app.session.length;
     var isPy = !isZ && (app.state.mode || 'py2word') !== 'word2py';
+    var pendingCount = (app.state.pending || []).length;
+    var lastAt = lastAtOf(it);
     var stemLabel = isZ ? '给字组词' : (isPy ? '看拼音写' : '看词语写拼音');
     var stemBody = isZ
       ? '<span class="zuci-char">' + esc(it.text) + '</span>' +
@@ -1078,17 +1228,30 @@
       '</div>' +
 
       '<div class="card card-q">' +
-      '<div class="lesson-tag">' + esc(it.no ? (lessonLabel({ no: it.no }) + '《' + it.title + '》') : it.title) + '</div>' +
+      '<div class="lesson-tag">' + esc(it.no ? (lessonLabel({ no: it.no }) + '《' + it.title + '》') : it.title) +
+      (lastAt ? '<span class="when">上次练过 ' + esc(fmtDay(lastAt)) + '</span>' : '') + '</div>' +
       '<div class="stem"><span class="stem-label">' + stemLabel + '</span>' + stemBody + '</div>' +
       parentNote +
       '<div class="write-wrap"><canvas id="writeCanvas"></canvas></div>' +
       '<div class="py-hint">' + hint + '</div>' +
       '<p class="card-note">长按某个格子，可只清空并重写那一个字；写点（i、j 的点）不受影响。</p>' +
       (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
+      (app.submitMsg ? '<div class="feedback warn">' + esc(app.submitMsg) + '</div>' : '') +
       '<div class="action-row">' +
       '<button class="btn btn-soft" data-act="clear">重写全部</button>' +
       '<button class="btn btn-primary" data-act="submit">写好了</button>' +
       '</div>' +
+      // 交的时机是"整轮写完"（那时会自动交），不是写一条交一条。
+      // 这个按钮是给"我想早点让家长看到"用的：点一下把已经写好的**一起**交上去。
+      '<div class="action-row">' +
+      '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
+      '<button class="btn btn-soft" data-act="submit-work">提交给家长批改' +
+      (pendingCount ? '（' + pendingCount + '）' : '') + '</button>' +
+      '</div>' +
+      '<p class="card-note">' + (pendingCount
+        ? '已经写好 ' + pendingCount + ' 条（都在这台设备上）。点一下就把这些全部一起传上去，' +
+          '家长在另一台设备上就能批了 —— 不点它不会自己传。'
+        : '不会自动上传：先在田字格里写、点「写好了」攒着，凑够了再点上面这个按钮一起传。') + '</p>' +
       '</div>';
   }
 
@@ -1134,8 +1297,12 @@
         '<span class="topbar-title">家长批改</span><span class="topbar-right"></span></div>' +
         '<div class="card">' +
         '<h2 class="card-title">没有待批改的</h2>' +
-        '<p class="card-note">孩子写完这里就会出现。最近批过 ' + st.history.length + ' 条。</p>' +
+        '<p class="card-note">孩子写完这里就会出现。最近批过 ' + st.history.length + ' 条。' +
+        (F && F.on() ? '这一页开着的时候会自动找新的（每 20 秒看一眼），不用一直刷新。' : '') +
+        '</p>' +
         '</div>' +
+        (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
+        submitGradesCard() +
         reviewStatsHtml();
     }
 
@@ -1158,6 +1325,8 @@
       '<div class="topbar"><button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">家长批改</span>' +
       '<span class="topbar-right">待批 ' + queue.length + ' 条</span></div>' +
+      // 自动轮询收到新作业时的那句话（放在最上面，家长一定看得见）
+      (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
       (p.dev && F && p.dev !== (F.sync() && F.sync().dev)
         ? '<div class="card card-quiet"><p class="card-note">这一条是「' +
           esc(p.devName || '另一台设备') + '」上写的。</p></div>'
@@ -1177,6 +1346,7 @@
       '<p class="card-note">批注会跟着这个词存下来，下次复习时会再显示给孩子看。</p>' +
       '</div>' +
 
+      submitGradesCard() +
       reviewStatsHtml();
   }
 
@@ -1339,15 +1509,59 @@
     // 所以把最近做过的题也列出来，对错标在每一条后面。
     // 手写题要等家长批改才进 history，所以这里不会混入"还没批"的题。
     var recent = hist.slice(-12).reverse().map(function (r) {
-      return '<li><b>' + esc(r.text) + '</b>　' +
-        (r.isCorrect ? '写对了' : '写错了') + '</li>';
+      return '<li><b>' + esc(reportItemText(r)) + '</b>　' +
+        (r.isCorrect ? '写对了' : '写错了') +
+        '<span class="when">' + esc(fmtDay(r.ts)) + '</span>' +
+        (r.note ? '<span class="advice">家长批注：' + esc(r.note) + '</span>' : '') + '</li>';
     }).join('');
+
+    // 一段时间内的批改历史：家长问得最多的是"这两天批了几条、错了哪些"。
+    // 报告页能按 今天 / 7 天 / 30 天 / 全部 切，这里先给一句 7 天的概览和入口。
+    var r7 = hist.filter(function (h) { return inRange(h, rangeStart('7')); });
+    var ok7 = r7.filter(function (h) { return h.isCorrect; }).length;
 
     return '<div class="card card-quiet">' +
       '<h2 class="card-title">做过的情况</h2>' +
       '<p class="card-note">一共 ' + done + ' 条，写对 ' + ok + ' 条（' +
-      Math.round(ok / done * 100) + '%）。</p>' +
+      Math.round(ok / done * 100) + '%' +
+      (hist[done - 1].ts ? '，最近一次 ' + esc(fmtDay(hist[done - 1].ts)) : '') + '）。</p>' +
+      '<p class="card-note">最近 7 天批了 ' + r7.length + ' 条' +
+      (r7.length ? ('，写对 ' + ok7 + ' 条（' + Math.round(ok7 / r7.length * 100) + '%）') : '') +
+      '。要按 今天 / 7 天 / 30 天 / 全部 翻更细的记录，去「练习报告」里切换。</p>' +
       '<ul class="tag-list">' + recent + '</ul>' +
+      '</div>';
+  }
+
+  // 一条练习内容在历史里怎么显示：把拼音一起摆出来。
+  // 以前只写汉字，家长看不出这条到底是「看拼音写词语」还是「看词语写拼音」——
+  // 写拼音那一档，只有拼音才说得清孩子写的是哪个音节。
+  // 多音字写「（读 bó）」：那一档问的就是读音，光给拼音两个字看不明白。
+  function reportItemText(h) {
+    var txt = String((h && h.text) || '');
+    var py = String((h && h.py) || '');
+    if (!py) return txt;
+    if (String((h && h.key) || '').indexOf('p:') === 0) return txt + '（读 ' + py + '）';
+    return txt + '（' + py + '）';
+  }
+
+  // 「提交批改」：批完不用等队列空就点一下，把攒下的批改结果传给孩子那台设备。
+  // 队列清空时本来也会自动传，这里给的是"我现在就想让他看到"的那条路。
+  function submitGradesCard() {
+    var on = !!(F && F.on());
+    var n = on ? F.pendingGrades() : 0;
+    return '<div class="card card-quiet">' +
+      '<h2 class="card-title">提交批改</h2>' +
+      '<p class="card-note">' + (on
+        ? (n
+          ? '已经批好 ' + n + ' 条，还没传上去。点一下提交，孩子那台设备下次联网就能看到。'
+          : '批好的结果会自动传；也可以点一下马上提交。')
+        : '这台设备没开跨设备同步，批改结果只留在这台设备上，孩子在别的设备上看不到。') + '</p>' +
+      '<button class="btn btn-primary btn-block" data-act="submit-grades"' +
+      (on ? '' : ' disabled') + '>' + (n ? '提交批改（' + n + '）' : '提交批改') + '</button>' +
+      // 孩子刚交上来、家长正等着的场景很常见。这一页开着的时候会自动看（每 20 秒一眼），
+      // 但这个按钮让人不用干等着猜。
+      '<button class="btn btn-ghost btn-block" data-act="reload-work"' +
+      (on ? '' : ' disabled') + '>看看有没有新交上来的作业</button>' +
       '</div>';
   }
 
@@ -1415,6 +1629,21 @@
       '</div>';
   }
 
+  // 报告里切"看哪一段时间"。只影响批改记录和错题两块的明细；
+  // 总览 / 按题型 / 按单元一直是累计的 —— 那些数字变小反而会让人以为数据丢了。
+  function rangePickerHtml() {
+    var cur = app.range || '7';
+    return '<div class="card card-quiet">' +
+      '<h2 class="card-title">看哪一段时间</h2>' +
+      '<div class="unit-row">' + RANGES.map(function (r) {
+        return '<button class="unit-btn' + (r.k === cur ? ' on' : '') +
+          '" data-act="range" data-r="' + r.k + '">' + r.name + '</button>';
+      }).join('') + '</div>' +
+      '<p class="card-note">切换只影响下面「批改记录」和「错题」两块；' +
+      '上面的总览、按题型、按单元一直是全部（累计）。</p>' +
+      '</div>';
+  }
+
   function reportBodyHtml() {
     var hist = mergedHistory();
     if (!hist.length) {
@@ -1422,6 +1651,12 @@
         '<p class="card-note">还没有做题记录。练过一次之后，这里会按题型和单元分开统计。</p></div>';
     }
     var ok = hist.filter(function (h) { return h.isCorrect; }).length;
+
+    // 一段时间内的记录：家长要看的是"这几天批了什么"，不是从头翻到尾
+    var since = rangeStart(app.range || '7');
+    var rangeTxt = rangeName(app.range || '7');
+    var rangeHist = hist.filter(function (h) { return inRange(h, since); });
+    var okRange = rangeHist.filter(function (h) { return h.isCorrect; }).length;
 
     function group(nameOf) {
       var g = {};
@@ -1448,16 +1683,30 @@
       return info ? info.name : (h.unit || '未记录');
     });
 
-    var wrong = hist.filter(function (h) { return !h.isCorrect; }).slice(-15).reverse();
+    var wrong = rangeHist.filter(function (h) { return !h.isCorrect; }).slice(-20).reverse();
     var wrongList = wrong.length
       ? '<ul class="tag-list">' + wrong.map(function (h) {
           // 多音字把正确读音一起列出来：家长得知道孩子到底选错了哪个音
-          var ans = String(h.key || '').indexOf('p:') === 0 && h.py
-            ? '（读 ' + esc(h.py) + '）' : '';
-          return '<li><b>' + esc(h.text) + '</b>' + ans +
-            (h.note ? '　' + esc(h.note) : '') + '</li>';
+          return '<li><b>' + esc(reportItemText(h)) + '</b>' +
+            '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
+            (h.note ? '<span class="advice">家长批注：' + esc(h.note) + '</span>' : '') + '</li>';
         }).join('') + '</ul>'
-      : '<p class="card-note">还没有错题。</p>';
+      : (rangeHist.length
+        ? '<p class="card-note">这段时间没有错题，挺好。</p>'
+        : '<p class="card-note">这段时间没有批改记录 —— 换「最近 30 天」或「全部」看看。</p>');
+
+    // 批改的全部内容：批的是哪一条、批成对还是错、家长写了什么批注、哪天批的。
+    // 家长最关心的就是这一份 —— 只给一个正确率，看不出"我上次提醒他什么、改了没有"。
+    var graded = rangeHist.slice(-60).reverse();
+    var gradedRows = graded.map(function (h) {
+      return '<div class="fb-row">' +
+        '<span class="fb-mark ' + (h.isCorrect ? 'ok' : 'bad') + '">' + (h.isCorrect ? '✓' : '✗') + '</span>' +
+        '<span class="fb-text"><b>' + esc(h.text) + '</b>' +
+        (h.py ? '<i>' + esc(h.py) + '</i>' : '') + '</span>' +
+        '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
+        (h.note ? '<div class="fb-note">家长批注：' + esc(h.note) + '</div>' : '') +
+        '</div>';
+    }).join('') || '<p class="card-note">这段时间没有批改记录 —— 换「最近 30 天」或「全部」看看。</p>';
 
     var due = 0, now = Date.now(), st = app.state.stats || {};
     Object.keys(st).forEach(function (k) {
@@ -1468,13 +1717,21 @@
       '<div class="card">' +
       '<h2 class="card-title">总览</h2>' +
       '<p class="card-note">一共 ' + hist.length + ' 题，写对 ' + ok + ' 题（' +
-      Math.round(ok / hist.length * 100) + '%）。</p>' +
+      Math.round(ok / hist.length * 100) + '%' +
+      (hist[hist.length - 1].ts ? '，最近一次 ' + esc(fmtDay(hist[hist.length - 1].ts)) : '') + '）。</p>' +
+      '<p class="card-note">' + rangeTxt + '批了 ' + rangeHist.length + ' 条' +
+      (rangeHist.length ? '，写对 ' + okRange + ' 条（' + Math.round(okRange / rangeHist.length * 100) + '%）' : '') +
+      '。</p>' +
       '<p class="card-note">今天到期该复习：' + due + ' 个；' +
       '还有 ' + app.state.pending.length + ' 条等家长批改。</p>' +
       '</div>' +
+      rangePickerHtml() +
       '<div class="card"><h2 class="card-title">按题型</h2>' + byKind + '</div>' +
       '<div class="card"><h2 class="card-title">按单元</h2>' + byUnit + '</div>' +
-      '<div class="card"><h2 class="card-title">最近的错题（最多 15 条）</h2>' +
+      '<div class="card"><h2 class="card-title">批改记录（' + rangeTxt + '，' + graded.length + ' 条）</h2>' +
+      '<p class="card-note">批过的每一条都在这里：批成对还是错、家长的批注、批改的日期。' +
+      '带拼音的是「看词语写拼音」那一档。</p>' + gradedRows + '</div>' +
+      '<div class="card"><h2 class="card-title">错题（' + rangeTxt + '，最多 20 条）</h2>' +
       '<p class="card-note">后面那句是家长批改时写的批注。</p>' + wrongList + '</div>';
   }
 
@@ -1483,9 +1740,58 @@
       '<div class="topbar">' +
       '<button class="btn-icon" data-act="home">←</button>' +
       '<span class="topbar-title">练习报告</span><span class="topbar-right"></span></div>' +
+      // 报告页只放报告。以前这儿还挂在"跨设备同步"和"别的设备上"两张卡上，
+      // 家长看报告时被设置项挡在中间 —— 同步挪回它自己那一页。
+      '<div class="card card-quiet">' +
+      '<p class="card-note">报告里包含练习和批改的全部内容。要在自己手机上看，' +
+      '去「跨设备同步」填上同一个家庭码（一个码管语文和数学）。</p>' +
+      '<button class="btn btn-ghost btn-block" data-act="sync">跨设备同步设置</button>' +
+      // 这一页开着的时候会自动看（每 30 秒），也给一个手动入口
+      '<button class="btn btn-ghost btn-block" data-act="reload-report">刷新（看看有没有新数据）</button>' +
+      '</div>' +
       reportBodyHtml() +
-      cloudReportsHtml() +
-      syncCardHtml();
+      // 别的设备上练得怎么样：报告正文已经把它们的记录合并进来了，
+      // 这一段是"数据来自哪几台设备"的来源说明（家长对不上数时靠它核对）。
+      cloudReportsHtml();
+  }
+
+  /* ============================== 视图：查看批改 ============================== */
+  // 孩子的入口：家长批成什么样、批注写了什么，随时能翻。
+  // 以前只有首页那张一次性的「家长刚批改了 N 条」，点过"知道了"就再也看不到 ——
+  // 而"上次说我把『崩』的山字头写丢了"恰恰是下次下笔前要再看一眼的东西。
+  function viewMyGrades() {
+    var hist = mergedHistory().slice().reverse();
+    var head = '<div class="topbar">' +
+      '<button class="btn-icon" data-act="home">←</button>' +
+      '<span class="topbar-title">查看批改</span>' +
+      '<span class="topbar-right">' + (hist.length ? hist.length + ' 条' : '') + '</span></div>';
+
+    if (!hist.length) {
+      return head +
+        '<div class="card"><h2 class="card-title">还没有批改</h2>' +
+        '<p class="card-note">写在田字格里的字要等家长批改。批完之后这里就会出现：' +
+        '对错、家长的批注、批改的日期都有。</p>' +
+        '<button class="btn btn-primary btn-block" data-act="home">回去写字</button></div>';
+    }
+
+    var wrong = hist.filter(function (h) { return !h.isCorrect; }).length;
+    var rows = hist.slice(0, 40).map(function (h) {
+      return '<div class="fb-row">' +
+        '<span class="fb-mark ' + (h.isCorrect ? 'ok' : 'bad') + '">' + (h.isCorrect ? '✓' : '✗') + '</span>' +
+        '<span class="fb-text"><b>' + esc(h.text) + '</b>' +
+        (h.py ? '<i>' + esc(h.py) + '</i>' : '') + '</span>' +
+        '<span class="when">' + esc(fmtDay(h.ts)) + '</span>' +
+        (h.note ? '<div class="fb-note">家长批注：' + esc(h.note) + '</div>' : '') +
+        '</div>';
+    }).join('');
+
+    return head +
+      '<div class="card">' +
+      '<h2 class="card-title">最近批改的 ' + Math.min(40, hist.length) + ' 条</h2>' +
+      '<p class="card-note">批过 ' + hist.length + ' 条，其中写错 ' + wrong + ' 条。' +
+      '写错的今天还会再出现一次，趁热重写一遍。</p>' +
+      rows +
+      '</div>';
   }
 
   // 跨设备同步单独一页。它以前只挂在报告页最底下，家长得先进报告、
@@ -1517,8 +1823,40 @@
     };
   }
 
+  /* --------------------------- 报告看哪一段时间 --------------------------- */
+  // 家长问的是"这几天他练得怎么样"，不是"有史以来"。所以报告里能选一段时间。
+  // 按**日历天**切（今天 0 点起算），不按 24 小时 —— 晚上九点批的那条，
+  // 第二天早上看"今天"就该不在了，否则"今天"和"昨天"会互相串。
+  var DAY_MS = 24 * 60 * 60 * 1000;
+  var RANGES = [
+    { k: 'today', name: '今天' },
+    { k: '7', name: '最近 7 天' },
+    { k: '30', name: '最近 30 天' },
+    { k: 'all', name: '全部' }
+  ];
+
+  function dayStart(t) {
+    var d = new Date(t);
+    if (typeof d.setHours === 'function') d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  function rangeStart(k) {
+    var base = dayStart(Date.now());
+    if (k === 'today') return base;
+    if (k === '7') return base - 6 * DAY_MS;    // 含今天，一共 7 天
+    if (k === '30') return base - 29 * DAY_MS;
+    return 0;                                   // 全部
+  }
+
+  function rangeName(k) {
+    for (var i = 0; i < RANGES.length; i++) if (RANGES[i].k === k) return RANGES[i].name;
+    return '全部';
+  }
+
+  function inRange(h, since) { return ((h && h.ts) || 0) >= since; }
+
   // 打开页面 / 从后台切回时取一次"家长在别处批的结果"。
-  // 刻意不做定时轮询 —— 平时完全不联网，不耗电也不跑流量。
   function refreshGrades() {
     if (!F || !F.on()) return;
     F.pullGrades(app.acked || []).then(function () {
@@ -1526,12 +1864,31 @@
     }).catch(function () { /* 连不上就算了，下次再试 */ });
   }
 
-  // 进家长批改页时拉一次别的设备传上来的作业（笔迹只放内存，不落本地存储）
-  function refreshCloudWork() {
+  // 进家长批改页时拉一次别的设备传上来的作业（笔迹只放内存，不落本地存储）。
+  //
+  // 两个开关分得很细，都是为了"别打断正在批改的家长"：
+  // - manual：家长自己点的「看看有没有新作业」。没变化也要给一句话，否则像按钮坏了。
+  // - 自动轮询（announce）：**内容没变就一个字都不重绘** —— 家长可能正往批注框里打字，
+  //   重绘会把刚写的字清掉、焦点也丢了。
+  function refreshCloudWork(opts) {
     if (!F || !F.on()) return;
+    var prevList = app.cloudWork || [];
+    var prevIds = prevList.map(function (x) { return x.id; }).join(',');
     F.pullWork().then(function (items) {
-      app.cloudWork = items || [];
-      if (app.view === 'parent') render();
+      var list = items || [];
+      app.cloudWork = list;
+      var nextIds = list.map(function (x) { return x.id; }).join(',');
+      var changed = nextIds !== prevIds;
+
+      if (changed) {
+        var add = list.length - prevList.length;
+        if (add > 0) app.message = '刚收到 ' + add + ' 条新交上来的作业。';
+      } else if (opts && opts.manual) {
+        app.message = '没有新交上来的作业。';
+      }
+
+      if (app.view !== 'parent') return;
+      if (changed || !opts || opts.manual) render();
     }).catch(function () { /* 失败就只批本机的，不打断家长 */ });
   }
 
@@ -1543,13 +1900,25 @@
     }).catch(function () {});
   }
 
+  /* ------------------- 为什么不做定时轮询（这是刻意的） ------------------- */
+  // 试过在批改页 / 报告页每 20~30 秒自动拉一次，用下来不合适：
+  // 页面在背后不停地请求，而拉回来一重绘，正在输的批注还可能被清掉。
+  //
+  // 所以用"手动一下"的模型（和 05_商品到期提醒 那套一样）：
+  //   · 孩子：整轮写完自动交一次；也可以点「提交给家长批改」马上交（交的是已写好的全部）
+  //   · 家长：批完点「提交批改」马上回传；想找新作业点「看看有没有新交上来的作业」
+  //   · 打开页面 / 从后台切回时各拉一次，其余时间一次请求都不发
+
   /* ============================== 动作 ============================== */
   function startSession() {
     app.session = buildSession(app.state.unit, app.state.lesson);
     app.cursor = 0;
     app.strokes = [];
     app.message = '';
+    app.submitMsg = '';
     app.view = 'practice';
+    // 整份题目存进 draft：写到一半被打断（关页面、平板没电），下次接着写
+    saveDraft('write');
     render();
   }
 
@@ -1565,7 +1934,9 @@
     app.cursor = 0;
     app.strokes = [];
     app.message = '';
+    app.submitMsg = '';
     app.view = 'practice';
+    saveDraft('write');
     render();
   }
 
@@ -1591,7 +1962,9 @@
     app.roundOk = 0;
     app.roundTotal = 0;
     app.message = '';
+    app.submitMsg = '';
     app.view = 'practice';
+    saveDraft('typed');
     render();
   }
 
@@ -1608,7 +1981,9 @@
     app.roundOk = 0;
     app.roundTotal = 0;
     app.message = '';
+    app.submitMsg = '';
     app.view = 'practice';
+    saveDraft('typed');
     render();
   }
 
@@ -1632,8 +2007,64 @@
     app.roundOk = 0;
     app.roundTotal = 0;
     app.message = '';
+    app.submitMsg = '';
     app.view = 'practice';
+    saveDraft('typed');
     render();
+  }
+
+  /* --------------------------- 提交（上传到云端） --------------------------- */
+  // 「提交给家长批改」：这是**唯一**会把作业传上去的动作，点一下就传。
+  // 传的是待批改队列里的全部（写多少传多少）；不点就一直留在本机 ——
+  // 挑个空闲的时候让孩子点一下，家长那边马上批，时间自己掌控。
+  //
+  // 这里刻意先标脏再传。cloud.js 的 flushWork 有一条"没有新写的就别白跑一趟"，
+  // 而这个按钮是明确要联网的动作 —— 点了却不发请求、界面什么都不发生，
+  // 看起来就像坏了。所以先 markWorkDirty，让这次一定走一趟。
+  function submitWork() {
+    var n = (app.state.pending || []).length;
+    if (!n) {
+      app.submitMsg = '还没有写好的题目 —— 先在田字格里写，点「写好了」，再来提交。';
+      return render();
+    }
+    if (!F || !F.on()) {
+      app.submitMsg = '这台设备还没开跨设备同步。让家长在首页「跨设备同步」里填上家庭码，' +
+        '之后提交就能传到家长手机上；现在写的这些留在本机，家长在这台设备上也能批。';
+      return render();
+    }
+    app.submitMsg = '正在提交…';
+    render();
+    F.markWorkDirty();
+    F.flushWork().then(function (r) {
+      if (r && r.ok) {
+        app.submitMsg = '已提交 ' + n + ' 条。家长在另一台设备上打开就能批改了。';
+        // 顺带把统计快照也推上去 —— 家长在自己手机上打开报告，那些数字才不是空的
+        F.pushReport(reportSnapshot());
+      } else {
+        app.submitMsg = '没提交上去（' + ((r && r.error) || '网络不通') + '）。写的字还在本机上，' +
+          '换到有网的地方再点一次「提交给家长批改」就行。';
+      }
+      render();
+    });
+  }
+
+  // 「提交批改」：家长批完（或者批到一半）点一下，把结果传回孩子那台设备。
+  // 队列清空时本来也会自动传，这里给的是"我现在就要让他看到"的那条路。
+  function submitGrades() {
+    if (!F || !F.on()) {
+      app.message = '没开跨设备同步：批改结果只在这台设备上生效，孩子在别的设备看不到。';
+      return render();
+    }
+    var n = F.pendingGrades();
+    app.message = '正在提交…';
+    render();
+    F.flushGrades().then(function (r) {
+      app.message = (r && r.ok)
+        ? (n ? ('已提交 ' + n + ' 条批改。孩子那台设备联网后就能看到。')
+             : '没有攒下的批改要提交 —— 刚批的已经传上去了。')
+        : ('没提交上去（' + ((r && r.error) || '网络不通') + '）。结果留在本机，下次联网会自动补。');
+      render();
+    });
   }
 
   // 默写判分要容错。孩子用的是手机输入法，多打一个空格、少打一个标点
@@ -1687,6 +2118,9 @@
       // 做了几题对了几题，全都一闪而过 —— 尤其是最后一句错了，
       // 正确答案刚显示出来页面就跳走了，等于没订正。
       app.view = 'done';
+      clearDraft();   // 这一轮做完了，草稿不用留
+    } else {
+      saveDraft('typed');
     }
     saveState();
     render();
@@ -1736,16 +2170,17 @@
     app.strokes = [];
     app.cursor++;
     app.message = '';
-    if (F && F.on()) F.markWorkDirty();
+    app.submitMsg = '';
+    // 这里不标脏、也不上传 —— 什么时候传由人点按钮决定（见 submitWork）。
+    // 不点就一直留在本机，家长在同一台设备上照样能批。
 
     if (app.cursor >= app.session.length) {
       app.view = 'home';
       app.session = null;
-      // 整轮写完才传：中途传上去家长也来不及批，白白多几次请求
-      if (F && F.on()) {
-        F.flushWork();
-        F.pushReport(reportSnapshot());
-      }
+      clearDraft();
+    } else {
+      // 没写完：记下"做到第几题、这题写到哪儿了"，下次接着写
+      saveDraft('write');
     }
     render();
   }
@@ -1780,7 +2215,10 @@
       ts: Date.now(), key: k, text: item.text, py: item.py || '',
       isCorrect: !!isCorrect, note: note || '',
       // 记下单元：报告要按单元分开统计，光有 key 反查不出来是哪一课的
-      unit: item.unit || app.state.unit || ''
+      unit: item.unit || app.state.unit || '',
+      // 记下练习模式：报告里要能说出这条是"看拼音写词语"还是"看词语写拼音"
+      // （写拼音那一档只看汉字是看不出来的）
+      mode: item.mode || ''
     });
     if (app.state.history.length > 2000) {
       app.state.history = app.state.history.slice(-2000);
@@ -1911,7 +2349,8 @@
           : app.view === 'sync' ? viewSync()
             : app.view === 'parent' ? viewParent()
               : app.view === 'ref' ? viewRef()
-                : viewHome();
+                : app.view === 'mygrades' ? viewMyGrades()
+                  : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' +
       (app.storageWarn ? '<div class="card card-warn">' + esc(app.storageWarn) + '</div>' : '') +
       // 同步相关的提示（比如"这条别人已经批过了"）放在最上面 ——
@@ -1986,6 +2425,27 @@
       return render();
     }
     if (act === 'mode') { app.state.mode = t.getAttribute('data-m') || 'py2word'; saveState(); return render(); }
+    // 报告里切"看哪一段时间"（今天 / 7 天 / 30 天 / 全部）
+    if (act === 'range') { app.range = t.getAttribute('data-r') || '7'; return render(); }
+    // 「看看有没有新作业」：马上拉一次，并告诉家长有没有新的
+    if (act === 'reload-work') {
+      // 没开同步时按钮本来就是禁用的，这里再兜一层：直接说清楚，
+      // 别留一句"正在看…"挂在页面上
+      if (!F || !F.on()) {
+        app.message = '这台设备没开跨设备同步 —— 别的设备上写的作业传不过来。';
+        return render();
+      }
+      app.message = '正在看有没有新交上来的作业…';
+      render();
+      refreshCloudWork({ announce: true, manual: true });
+      return;
+    }
+    // 「刷新」：报告页马上拉一次别的设备的统计，别让家长自己想到去切后台
+    if (act === 'reload-report') {
+      refreshReports();
+      refreshGrades();
+      return render();
+    }
     if (act === 'start') return startSession();
     if (act === 'start-zuci') return startZuci();
     if (act === 'start-poly') return startPoly();
@@ -2003,17 +2463,30 @@
       if (F && F.on()) F.flushGrades();
       app.view = 'home';
       app.session = null;
+      app.submitMsg = '';
       return render();
     }
     if (act === 'quit') {
       app.view = 'home';
       app.session = null;
-      // 中途退出也把已经写的传上去 —— 不然孩子写到一半走了，家长那边一条都看不到
-      if (F && F.on()) F.flushWork();
+      app.submitMsg = '';
+      // 不在这里传：什么时候传由人点「提交给家长批改」决定（全手动）。
+      // draft 故意留着 —— 退出常常是"被打断"，不是"不写了"，下次进来还能接着写。
       return render();
     }
     if (act === 'clear') { app.strokes = []; app.message = ''; return render(); }
     if (act === 'submit') return submitWriting();
+    if (act === 'submit-work') return submitWork();
+    if (act === 'submit-grades') return submitGrades();
+    if (act === 'my-grades') {
+      app.submitMsg = '';
+      app.message = '';
+      app.view = 'mygrades';
+      refreshGrades();   // 进来看一眼家长有没有新批的（只拉取，不上传）
+      return render();
+    }
+    if (act === 'resume') return resumeDraft();
+    if (act === 'drop-draft') { clearDraft(); app.message = ''; return render(); }
     if (act === 'ref') { app.view = 'ref'; return render(); }
     if (act === 'report') {
       // 报告里有错题和正确答案，给孩子看不合适：他会照着答案把错字抄一遍，
@@ -2061,6 +2534,7 @@
       }
       app.state.passcode = v;
       app.parentUnlocked = true;
+      app.message = '';        // 别把"口令要 4～6 位数字"那句带进批改页
       saveState();
       refreshCloudWork();
       if (app.afterUnlock === 'sync') {   // 从首页「跨设备同步」进来的，直奔同步页
@@ -2078,6 +2552,7 @@
         return render();
       }
       app.parentUnlocked = true;
+      app.message = '';        // "口令不对"那句不能跟着进批改页（上面新增了 message 显示位）
       refreshCloudWork();
       if (app.afterUnlock === 'sync') {
         app.afterUnlock = '';
@@ -2182,16 +2657,20 @@
     }
 
     // 从后台切回前台时取一次结果；切走时把攒下的批改结果发出去。
-    // 平时不联网，也不做定时轮询。
+    // **作业不自动上传** —— 那是纯手动的（见 submitWork）：什么时候传、什么时候批，
+    // 由人自己挑时间。不做定时器，也不轮询。
     if (typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible') {
           refreshGrades();
-          // 上次没传成功的作业，回到前台补一次（刻意不做定时器，也不轮询）
+          // 在批改页切回来时，顺手看一眼有没有新交上来的作业
+          if (app.view === 'parent') refreshCloudWork();
+          // 上次点了提交但没传成功的，回到前台补一次（只是把那次没送到的送到）
           if (F && F.on() && F.isDirty()) F.flushWork();
-        } else if (F && F.on()) {
-          F.flushGrades();
+          return;
         }
+        // 刚批完的结果别丢：切走时发一次
+        if (F && F.on()) F.flushGrades();
       });
     }
 

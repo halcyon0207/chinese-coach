@@ -280,3 +280,17 @@ html, body {
   cursor: pointer;
 }
 .mode-btn.on { border-color: var(--primary); color: var(--primary); background: #fff; font-weight: 600; }
+
+/* ==================== 家长区：一行两个主按钮 ==================== */
+/* 家长进来最常做的是"批改"和"看报告"，这两个并排放在最上面；
+   家庭码配一次基本就不动了，收成下面一行的小按钮。 */
+.parent-row { display: flex; gap: 8px; margin-top: 8px; }
+.parent-row .btn { flex: 1; padding: 10px 8px; font-size: 15px; }
+
+/* ==================== 日期角标 ==================== */
+/* "上次练过 9月24日" / 课时按钮上的 9/24：
+   练过什么时候，孩子和家长都得看得见 —— 不然"这课我练过没有"只能靠猜。 */
+.when { color: var(--muted); font-size: 12px; margin-left: 6px; white-space: nowrap; }
+.fb-row { flex-wrap: wrap; }
+.fb-row .when { margin-left: auto; }
+.fb-row .fb-note { flex: 1 1 100%; }

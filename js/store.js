@@ -29,6 +29,9 @@
       pending: [],       // 待家长批改
       feedback: [],      // 家长刚批改完、还没给孩子看的结果
       history: [],       // 已批改
+      // 没写完的那一轮：整份题目 + 做到第几题 + 当前题的笔迹。
+      // 练习被打断是常态，下次进同一台设备要能接着写（见 app.js 的 saveDraft）。
+      draft: null,
       sync: null         // 跨设备同步（家庭码 / 设备标识），见 js/cloud.js；没开就是 null
     };
   }
@@ -58,6 +61,7 @@
         pending: arr(s.pending, []),
         feedback: arr(s.feedback, []),
         history: arr(s.history, []),
+        draft: obj(s.draft, null),
         sync: obj(s.sync, { on: false, fam: '', dev: '', name: '', lastAt: 0 })
       };
     } catch (e) {

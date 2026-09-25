@@ -180,21 +180,25 @@
     return { action: 'work.push', fam: s.fam, dev: s.dev, items: items };
   }
 
-  // 一整轮写完（或者中途退出）时才真的发这一次
+  // 一整轮写完（或者点了「提交给家长批改」）时才真的发这一次。
+  //
+  // 返回 { ok }: 界面上那个提交按钮要照着说一句实话 ——
+  // "已提交"和"没传上去"对家长是两件完全不同的事。老调用方不看返回值，照旧。
   function flushWork() {
-    if (!on()) return Promise.resolve();
+    if (!on()) return Promise.resolve({ ok: false, error: '没开同步' });
     var s = sync();
-    if (!s.dirty) return Promise.resolve();   // 没有新写的，就别白跑一趟
+    if (!s.dirty) return Promise.resolve({ ok: true, skipped: true });   // 没有新写的，就别白跑一趟
     s.dirty = false;
     return post(workPayload()).then(function (data) {
       lastError = '';
       // 搭车带回来的批改结果：孩子端不用再单独发一次请求
       if (data.grades && data.grades.length && hooks.applyGrades) hooks.applyGrades(data.grades);
       if (hooks.onStatus) hooks.onStatus();
-      return data;
+      return { ok: true, data: data };
     }).catch(function (e) {
       s.dirty = true;   // 没传上去，下次联网再补
       note(e);
+      return { ok: false, error: lastError };
     });
   }
 
@@ -211,9 +215,9 @@
   }
 
   function flushGrades() {
-    if (!on()) return Promise.resolve();
+    if (!on()) return Promise.resolve({ ok: false, error: '没开同步' });
     var s = sync();
-    if (!Array.isArray(s.outbox) || !s.outbox.length) return Promise.resolve();
+    if (!Array.isArray(s.outbox) || !s.outbox.length) return Promise.resolve({ ok: true, skipped: true });
 
     var list = s.outbox.slice();
     s.outbox = [];
@@ -230,11 +234,12 @@
           if (typeof console !== 'undefined' && console.warn) console.warn('[cloud] onGraded 出错：', cbErr);
         }
         if (hooks.onStatus) hooks.onStatus();
-        return data;
+        return { ok: true, count: list.length };
       })
       .catch(function (e) {
         s.outbox = list.concat(s.outbox || []);   // 没传上去，下次再补
         note(e);
+        return { ok: false, error: lastError };
       });
   }
 
@@ -323,9 +328,9 @@
     var s = sync();
     if (!s || !s.on) return '未开启跨设备同步';
     // 没有定时器、也不轮询（这是刻意的选择），所以失败之后要给人一条能自己动手的路：
-    // 切到后台再回来就会重试一次。这句得说出来，否则家长只能干等。
+    // 回到前台、或者再点一次提交就会重试。这句得说出来，否则家长只能干等。
     if (isDirty() && lastError) {
-      return '有作业没传上去（' + lastError + '），切到后台再回来就会重试';
+      return '有作业没传上去（' + lastError + '），再点一次「提交给家长批改」就会重试';
     }
     if (isDirty()) return '有作业还没传上去';
     if (lastError) return '同步暂不可用（' + lastError + '），数据还在本机';
