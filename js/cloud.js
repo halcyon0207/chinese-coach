@@ -201,12 +201,30 @@
     });
   }
 
-  // 一条作业瘦身后大概多少字节 —— 只用来切批，不要求精确
-  var BATCH_MAX_ITEMS = 10;
-  var BATCH_MAX_BYTES = 80 * 1024;   // 云函数请求体 256KB 上限，切批时留足余量
+  // 切批几乎只看体积，条数只是兜底。
+  //
+  // 为什么不再按"每批 10 条"切：云端每收一个请求都要"读整个家庭那份 JSON → 改 → 写回"，
+  // 文件越大一个来回越慢。62 条作业按 10 条一批就是 7 个来回（实测半分钟往上），
+  // 而这 7 个来回期间界面上只有一句"正在提交…" —— 看着像卡死了，其实一直在传，
+  // 家长在那头刷新看到的自然也只有"先到的那一部分"（提交根本还没结束）。
+  // 所以一个请求能装多少就装多少：云函数请求体上限 256KB，这里留足余量。
+  var BATCH_MAX_ITEMS = 60;          // 只是兜底：真正在切的是字节数
+  var BATCH_MAX_BYTES = 150 * 1024;
+
+  // 请求体的大小要按 UTF-8 **字节**算，不是字符数：JSON 里的中文一个字占 3 字节，
+  // 按字符数估会低估（一条作业里题目、单元名都是中文），真超了 256KB
+  // 会被云函数整个打回 —— 那一批白传，还得从头再来。
+  function byteLen(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      n += (c < 0x80) ? 1 : ((c < 0x800) ? 2 : 3);
+    }
+    return n;
+  }
 
   function sizeOf(o) {
-    try { return JSON.stringify(o).length; } catch (e) { return 4096; }
+    try { return byteLen(JSON.stringify(o)); } catch (e) { return 4096; }
   }
 
   // 写完一条：只在本机记一笔"有待传的"，不发请求。
@@ -244,9 +262,26 @@
   // 后面的批带 append 往上垒 —— 几批的并集正好是完整的队列，结果和一次发完一样，
   // 只是分成了几个请求。
   //
+  // 一次失败就放弃太贵：整批重来意味着云端又要"读一遍、写一遍"那个大文件，
+  // 而网络抖一下恰恰是这里最常见的失败。所以只重试一次，而且退避一下再试 ——
+  // 但服务端说"太频繁"（429）时**不**重试：那时候重试只会把队列堵得更死。
+  function postOnce(body) {
+    return post(body).catch(function (e) {
+      var m = (e && e.message) || '';
+      if (/429|频繁/.test(m)) throw e;
+      return new Promise(function (res) { setTimeout(res, 1200); }).then(function () {
+        return post(body);
+      });
+    });
+  }
+
   // 返回 { ok }: 界面上那个提交按钮要照着说一句实话 ——
   // "已提交"和"没传上去"对家长是两件完全不同的事。老调用方不看返回值，照旧。
-  function flushWork() {
+  //
+  // onProgress（可选）每批落地后调一次，带上 { batch, batches, sent, total }：
+  // 六十多条要传半分钟，界面上只写一句"正在提交…"和卡死没区别 ——
+  // 家长在那头看见"只到了 26 条"就是这么来的：提交还在半路上，他先刷新了。
+  function flushWork(onProgress) {
     if (!on()) return Promise.resolve({ ok: false, error: '没开同步' });
     var s = sync();
     if (!s.dirty) return Promise.resolve({ ok: true, skipped: true });   // 没有新写的，就别白跑一趟
@@ -255,9 +290,26 @@
     var all = workPayload().items;
     if (!all.length) return Promise.resolve({ ok: true, skipped: true });
 
+    // 断点续传：上一次没传完的（断网、超时、关页面）已经躺在云端了，这次只补剩下的。
+    // 不记这笔账的话，一次失败就得把整个队列从第一批重新覆盖一遍 ——
+    // 六十多条从头再来就是好几分钟，而"其实只差最后一批没上去"是最常见的情况。
+    var doneIds = [];
+    var pushed = {};
+    (Array.isArray(s.workPushed) ? s.workPushed : []).forEach(function (id) {
+      if (!pushed[id]) { pushed[id] = 1; doneIds.push(id); }
+    });
+    var resume = doneIds.length > 0;
+    var todo = all.filter(function (it) { return !pushed[it.id]; });
+    if (!todo.length) {   // 上次其实全传上去了，只是回信没等到
+      s.workPushed = [];
+      lastError = '';
+      if (hooks.onStatus) hooks.onStatus();
+      return Promise.resolve({ ok: true, count: all.length, batches: 0 });
+    }
+
     var batches = [];
     var cur = [], curBytes = 0;
-    all.forEach(function (it) {
+    todo.forEach(function (it) {
       var n = sizeOf(it);
       if (cur.length && (cur.length >= BATCH_MAX_ITEMS || curBytes + n > BATCH_MAX_BYTES)) {
         batches.push(cur);
@@ -271,31 +323,40 @@
 
     var grades = [];
     var full = 0;   // 云端装不下、还留在本机的条数
+    var sent = 0;
     var chain = Promise.resolve();
     batches.forEach(function (batch, i) {
       chain = chain.then(function () {
         var body = { action: 'work.push', fam: s.fam, dev: s.dev, items: batch };
-        // 第一批不带 append（整份覆盖），后面几批往上垒
-        if (i > 0) body.append = true;
-        return post(body).then(function (data) {
+        // 第一批不带 append（整份覆盖），后面几批往上垒；
+        // 接着上次没传完的那批也必须带 append —— 否则会把已经上去的那部分冲掉。
+        if (i > 0 || resume) body.append = true;
+        return postOnce(body).then(function (data) {
           // 搭车带回来的批改结果：孩子端不用再单独发一次请求
           if (data && data.grades && data.grades.length) grades = grades.concat(data.grades);
           // 云端说"装不下了"的条数。每批各报各的，要累加 ——
           // 空间是逐批消耗掉的，后面的批可能整批都塞不进去。
           if (data && typeof data.full === 'number') full += data.full;
+          batch.forEach(function (it) { doneIds.push(it.id); });
+          sent += batch.length;
+          if (typeof onProgress === 'function') {
+            onProgress({ batch: i + 1, batches: batches.length, sent: sent, total: todo.length });
+          }
         });
       });
     });
 
     return chain.then(function () {
       lastError = '';
+      s.workPushed = [];
       if (grades.length && hooks.applyGrades) hooks.applyGrades(grades);
       if (hooks.onStatus) hooks.onStatus();
       return { ok: true, count: all.length, batches: batches.length, full: full };
     }).catch(function (e) {
-      s.dirty = true;   // 没传上去，下次联网再补（重发会从第一批重新覆盖，不会留半截）
+      s.dirty = true;          // 下次联网再补
+      s.workPushed = doneIds;  // 已经上去的那些记下来，下次只补剩下的
       note(e);
-      return { ok: false, error: lastError };
+      return { ok: false, error: lastError, sent: doneIds.length, total: all.length };
     });
   }
 
@@ -390,6 +451,7 @@
   function clearDevice() {
     if (!on()) return Promise.resolve();
     var s = sync();
+    s.workPushed = [];   // 云端那份已经清了，"上次传到哪"这笔账也跟着作废旧
     return post({ action: 'clear', fam: s.fam, dev: s.dev });
   }
 
