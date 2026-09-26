@@ -343,14 +343,21 @@
     } else {
       // 竖排一列的时候横向没有别人抢地方，格子能放大就放大（写起来更稳），
       // 但字一多就收一点，免得整页太长、写一个字就要滑一次屏。
-      var cap = vertical ? (n >= 7 ? 96 : (n >= 5 ? 120 : 150)) : 118;
+      //
+      // 组词（forceCols）虽然也走竖排这条路（为了靠右摆），实际是 4 列 2 行。
+      // 它跟"一列 8 格"完全不是一回事：孩子要一笔一画写词语，格子给足。
+      var cap = forceCols ? 150 : (vertical ? (n >= 7 ? 96 : (n >= 5 ? 120 : 150)) : 118);
       if (vertical && typeof window !== 'undefined' && window.innerHeight) {
         // 竖排会变成一长条。格子还按 150 排的话，一屏只够看三格，
         // 剩下的得滑屏才够得着 —— 而画布上是 touch-action:none（不然写字会被
         // 滚动打断），在画布上根本滑不动。按屏幕高度收一收，尽量一屏写完；
         // 下限 72 是保证格子还写得开的底线。
-        var room = window.innerHeight * 0.62 - pad * 2 - (n - 1) * gap;
-        cap = Math.max(72, Math.min(cap, Math.floor(room / n)));
+        //
+        // 这里要按**行数**切，不能按格子数：一列 8 格就是 8 行，按 8 份分屏没毛病；
+        // 组词 8 格只有 2 行（4 格一行），按 8 份分就把本来一屏写得下的地方
+        // 白白切成一个个 72px 的小格子 —— 组词的格子原来就是这么被压小的。
+        var room = window.innerHeight * 0.62 - pad * 2 - (rows - 1) * gap;
+        cap = Math.max(72, Math.min(cap, Math.floor(room / rows)));
       }
       var side = Math.floor(Math.min(avail, cap));
       w = h = Math.max(side, 46);
@@ -492,6 +499,11 @@
       y: e.clientY - r.top
     };
   }
+
+  // 采样点的"身份证"。同一批原始点可能被 pointerrawupdate 和 pointermove
+  // 各送来一次，两个监听器都画的话同一段会画两遍（半透明的抗锯齿叠起来，
+  // 笔画上会出现一串深色的疙瘩），笔迹数组也会凭空胀一倍。
+  function ptKey(p) { return p.x + ',' + p.y; }
 
   // 一次 pointermove 里浏览器可能攒了好几个采样点（电容笔尤其明显）。
   // 只取最后一个的话，快写时笔画会变成几段直棱棱的折线 ——
@@ -661,13 +673,16 @@
         cancelGrace[graceType] = null;
         live[e.pointerId] = g;
         g.pts.push(normAt(p, g.cell));
+        g.lastPt = p;
+        g.dedup = [ptKey(p)];
         drawDot(ctx, p);
         e.preventDefault();
         return;
       }
-      // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"
+      // 存归一化坐标（跨设备回放要用）。像素位置只留在 downPos 里，用来判断"有没有真的动笔"。
+      // lastPt / dedup：给下面判重用（见 ptKey 的注释）。
       var s = {
-        cell: anchor, pts: [normAt(p, anchor)], downPos: p,
+        cell: anchor, pts: [normAt(p, anchor)], downPos: p, lastPt: p, dedup: [ptKey(p)],
         moved: false, holdTimer: null, norm: true, pen: isPen
       };
       geo.list.push(s);
@@ -688,7 +703,8 @@
       }, 700);
       e.preventDefault();
     });
-    cv.addEventListener('pointermove', function (e) {
+    // 采样点进来都走这里：pointermove 和 pointerrawupdate 共用同一套处理。
+    function onMove(e) {
       var s = live[e.pointerId];
       if (!s || s.dead) return;
       // 这一批采样点只补画新增的那一小段，不整块重画：
@@ -701,6 +717,10 @@
       var grew = false;
       for (var i = 0; i < evts.length; i++) {
         var p = posOf(cv, evts[i]);
+        var k = ptKey(p);
+        if (s.dedup.indexOf(k) >= 0) continue;   // 这个点刚画过了，别画第二遍
+        s.dedup.push(k);
+        if (s.dedup.length > 6) s.dedup.shift();
         if (!s.moved && (Math.abs(p.x - s.downPos.x) > 6 || Math.abs(p.y - s.downPos.y) > 6)) {
           s.moved = true;
           stopHold(s); // 已经动笔，就不再算"长按清空"
@@ -713,7 +733,14 @@
       }
       if (grew) ctx.stroke();
       e.preventDefault();
-    });
+    }
+    cv.addEventListener('pointermove', onMove);
+    // pointerrawupdate：笔还在移动、浏览器这一帧却还没排到合成时，采样点不会被合并掉。
+    // 低配平板上帧率一掉，pointermove 就只剩每帧一个点，笔画跟着一截一截断；
+    // 支持这个事件的浏览器（Chrome / Edge）会把笔的原始采样立刻送过来（笔常是 120Hz 以上）。
+    // 不支持的（iOS Safari、老浏览器）根本不派发它，pointermove 那条路照旧。
+    // 两条路都可能拿到同一批点，靠上面的 dedup 判重。
+    if ('onpointerrawupdate' in cv) cv.addEventListener('pointerrawupdate', onMove);
     function endStroke(e) {
       var s = live[e.pointerId];
       if (!s) return;
@@ -731,14 +758,22 @@
 
     // pointercancel: 浏览器可能因为手掌识别、系统手势（边缘滑动返回等）
     // 把当前指针取消掉。直接删掉这一笔的话，电容笔还压在屏上、接着写就从
-    // 断点起了一笔新的 —— 字中间就断了一截。所以给一个很短的宽限：
+    // 断点起了一笔新的 —— 字中间就断了一截。所以给一段宽限：
     // 同一类指针（笔 / 手指）如果很快又落下，就接着上一笔写；超过宽限才算真结束。
+    //
+    // 宽限给到 0.3 秒：电容笔（尤其是被动式圆盘笔）笔尖稍微翘一点、接触面积
+    // 不够时，浏览器会先来一个 pointercancel，孩子抬都不抬就接着往下写。
+    // 150ms 那种"很短"的宽限经常赶不上，笔迹就在那儿断一截 —— 看着像"断笔"。
+    // 真写完一个字抬笔走的是 pointerup，不在这里，所以加长它不会把两个字连起来。
     var cancelGrace = {};
     function cancelStroke(e) {
       var s = live[e.pointerId];
       if (!s) return;
       stopHold(s);
       delete live[e.pointerId];
+      // 立刻记下"笔刚断过"：live 里已经没有 pen 了，penLive() 帮不上忙，
+      // 下面这 0.3 秒的宽限期内手掌压上来就会被当成手指起一笔，画出一道掌痕。
+      if (e.pointerType === 'pen') penAt = Date.now();
       var type = e.pointerType || '';
       cancelGrace[type] = s;
       setTimeout(function () {
@@ -750,7 +785,7 @@
           dropStroke(s);
           geo.redraw();
         }
-      }, 150);
+      }, 300);
     }
     // 不用 pointerleave：笔尖滑到画布边缘外（画布现在只有一列那么宽，
     // 很容易碰到）就被判成"这一笔写完了"，孩子接着写就从那儿断开。
