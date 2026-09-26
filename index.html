@@ -7,8 +7,10 @@
 <meta name="theme-color" content="#0f1218" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="语文小教练">
+<!-- 页面自身的版本号。下面的自检脚本靠它判断"线上是不是已经更新了"。 -->
+<meta name="app-ver" content="20260926g">
 <title>语文小教练 · 四年级上册</title>
-<link rel="stylesheet" href="styles.css?v=20260926f">
+<link rel="stylesheet" href="styles.css?v=20260926g">
 </head>
 <body>
 
@@ -24,14 +26,44 @@
     app    → 界面
   刻意用普通 script 而不是 ES module：这样直接双击 index.html 也能跑，不用起服务器。
 -->
-<script src="js/data.js?v=20260926f"></script>
-<script src="js/recite.js?v=20260926f"></script>
-<script src="js/jiaoan.js?v=20260926f"></script>
+<script src="js/data.js?v=20260926g"></script>
+<script src="js/recite.js?v=20260926g"></script>
+<script src="js/jiaoan.js?v=20260926g"></script>
 <!-- 改动的脚本带版本号：GitHub Pages 的缓存很顽固，不加会一直用旧文件。
      一套脚本用同一个版本号 —— 只换一部分的话，新旧混在一起最容易出怪事。 -->
-<script src="js/store.js?v=20260926f"></script>
-<script src="js/cloud.js?v=20260926f"></script>
-<script src="js/app.js?v=20260926f"></script>
+<script src="js/store.js?v=20260926g"></script>
+<script src="js/cloud.js?v=20260926g"></script>
+<script src="js/app.js?v=20260926g"></script>
+
+<script>
+/* 打开时回头问一句线上：现在是哪个版本？
+ *
+ * 为什么要有这一段：平板上的图标是"添加到桌面"的，浏览器对 index.html 本身
+ * 也在缓存 —— 我这边改完推上去了，孩子点开图标可能还是上一次的页面，
+ * 得让他下拉刷新才生效。这一小段在页面跑起来之后去线上取一次 index.html
+ * （绕开缓存），发现版本号不一样就带一个时间戳重载一次。
+ *
+ * 只刷一次：同一个新版本记在 sessionStorage 里。要是中间有个缓存层一直返回旧版，
+ * 不加这个限制就会来回刷个不停。
+ *
+ * 改版本时把这个数字和上面所有 ?v= 一起换（本来也要求一起换）。
+ */
+(function () {
+  var CUR = '20260926g';
+  try {
+    fetch('index.html?ping=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.text() : ''; })
+      .then(function (html) {
+        var m = /<meta name="app-ver" content="([^"]+)"/.exec(html || '');
+        if (!m || m[1] === CUR) return;
+        if (sessionStorage.getItem('cc-ver-tried') === m[1]) return;
+        sessionStorage.setItem('cc-ver-tried', m[1]);
+        location.replace(location.pathname + '?v=' + m[1] + location.hash);
+      })
+      .catch(function () {});
+  } catch (e) {}
+})();
+</script>
 
 </body>
 </html>

@@ -140,6 +140,29 @@
   /* ============================== 出题 ============================== */
   function keyOf(it) { return it.kind + ':' + it.text; }
 
+  // 这一条现在练的是哪种题型。组词自成一种（'zuci'），
+  // 其余看首页选的是"看拼音写词语"（py2word）还是"看词语写拼音"（word2py）。
+  //
+  // 为什么批注要按题型分：家长在写字题上说的"想办法不要乱出头"，评的是**字形**；
+  // 同一道题切到"看词语写拼音"，那条批注就不该再冒出来 —— 拼音考的是读音，
+  // 而且那时候拼音题根本还没练过、还没批过。
+  function modeOfItem(it) {
+    return (it && it.kind === 'z') ? 'zuci' : (app.state.mode || 'py2word');
+  }
+
+  // 取某个题型下家长留的批注。
+  // 老数据里批注只有一个字段 note（那时只有"看拼音写词语"一种模式），
+  // 所以把它算作写字模式的批注；拼音和组词各自看各自那一栏。
+  function noteForMode(rec, mode) {
+    if (!rec) return '';
+    var md = mode || 'py2word';
+    if (rec.notes && typeof rec.notes === 'object') {
+      var v = rec.notes[md];
+      if (typeof v === 'string' && v) return v;
+    }
+    return (md === 'py2word' && typeof rec.note === 'string') ? rec.note : '';
+  }
+
   function lessonLabel(ln) {
     return ln.no ? ('第 ' + ln.no + ' 课') : '语文园地';
   }
@@ -994,10 +1017,25 @@
     var fb = app.state.feedback || [];
     if (!fb.length) return '';
 
-    var redoN = fb.filter(function (f) { return !f.isCorrect && isRedoable(f); }).length;
+    var wrong = fb.filter(function (f) { return !f.isCorrect; });
+    var rightN = fb.length - wrong.length;
+    var redoN = wrong.filter(isRedoable).length;
+    // 写对了、但家长还是留了话的，也要摆出来 —— 一句批注比一个 ✓ 值钱得多，
+    // 不能因为打的是对勾就把那句话吞掉。
+    var noted = fb.filter(function (f) { return f.isCorrect && f.note; });
+    var list = wrong.concat(noted);
 
+    // 一屏里先说清楚两件事：**几条要订正**、**现在点哪里**。
+    //
+    // 原来六十多条一次全铺开、按钮压在最后 —— 孩子得一路滑到底才够得着按钮，
+    // 而中间那些"写对了"的条目纯粹是挡路的。现在改成：
+    //   摘要一句话（要订正 N 条 / 写对 M 条）→ 按钮紧跟其后 →
+    //   只有要订正的才展开（带"你当时写的是这样"），写对的收成一行。
+    // 订正的时候本来就有一条一条带他改的流程，所以列表里最多只摆前几条，
+    // 剩下的不用在首页摊开。
+    var SHOW = 6;
     app._miniReplay = [];
-    var rows = fb.map(function (f, i) {
+    var rows = list.slice(0, SHOW).map(function (f, i) {
       var id = 'fmini-' + i;
       if (f.strokes && f.strokes.length) {
         app._miniReplay.push({
@@ -1010,7 +1048,7 @@
         (f.isCorrect ? '✓' : '✗') + '</span>' +
         '<span class="fb-text"><b>' + esc(f.text) + '</b><i>' + esc(f.py) + '</i></span>' +
         (f.note ? '<div class="fb-note">家长说：' + esc(f.note) + '</div>' : '') +
-        // 把"你当时写成了什么样"摆出来。光看一个 ✗，孩子记不起自己哪一写歪了，
+        // 把"你当时写成了什么样"摆出来。光说一句"这个字错了"，孩子记不起自己哪一写歪了，
         // 家长那句"崩少了山字头"也就落不到具体的笔画上。
         (f.strokes && f.strokes.length
           ? '<div class="ink-label">你写的是这样</div>' + miniCanvasHtml(id, f.cells || f.text.length)
@@ -1018,18 +1056,31 @@
         '</div>';
     }).join('');
 
+    var moreLine = list.length > SHOW
+      ? '<p class="card-note">还有 ' + (list.length - SHOW) + ' 条也在这个名单里 —— ' +
+        '点上面的按钮，会一条一条带着你改，改到哪条就看到哪条。</p>'
+      : '';
+    var listHead = wrong.length
+      ? '这几条要改：先看看自己写成了什么样，再读家长的批注'
+      : '家长有话要说：';
+
     return '<div class="card card-cta">' +
-      '<h2 class="card-title">家长刚批改了 ' + fb.length + ' 条' +
-      (redoN ? '（写错 ' + redoN + ' 条）' : '') + '</h2>' +
-      '<p class="card-note">先看看自己写成了什么样、再读一遍批注，想清楚错在哪 —— ' +
-      '写第二遍的时候别照着正确答案描，那就变成抄了。</p>' +
-      rows +
+      '<h2 class="card-title">家长批改好了</h2>' +
+      '<p class="fb-sum">' +
+      '<span class="fb-chip bad">要订正 ' + wrong.length + '</span>' +
+      (rightN ? '<span class="fb-chip ok">写对 ' + rightN + '</span>' : '') +
+      '</p>' +
       (redoN
         ? '<button class="btn btn-primary btn-block" data-act="start-redo">' +
-          '把写错的订正一遍（' + redoN + '）</button>'
+          '马上订正这 ' + redoN + ' 条</button>'
         : '') +
       '<button class="btn ' + (redoN ? 'btn-ghost' : 'btn-primary') +
-      ' btn-block" data-act="ack-feedback">知道了</button>' +
+      ' btn-block" data-act="ack-feedback">' + (redoN ? '知道了，先不订正' : '知道了') + '</button>' +
+      (list.length
+        ? '<div class="fb-list">' +
+          '<div class="fb-list-head">' + esc(listHead) + '</div>' +
+          rows + moreLine + '</div>'
+        : '<p class="card-note">全都写对了，接着往下做就行。</p>') +
       '</div>';
   }
 
@@ -1112,23 +1163,158 @@
       '</div></div>';
   }
 
-  // 首页的「今天该复习」：把到期的摆出来，再给一个"只练这些"的入口。
-  //
-  // 这是间隔复习唯一能被孩子看见的地方 —— 报告里那句"今天到期该复习 N 个"
-  // 在口令后面，只有家长看得到；而复习这件事得孩子自己去点才会发生。
-  function dueCard() {
-    var list = dueItems();
-    if (!list.length) return '';
-    var names = list.slice(0, 10).map(function (it) { return esc(it.text); }).join('、');
-    return '<div class="card card-due">' +
-      '<h2 class="card-title">今天该复习（' + list.length + '）</h2>' +
-      '<p class="card-note">按 1/2/4/7/15 天的节奏，这些今天到期了。现在过一遍，' +
-      '比过几天再捡起来省力得多。</p>' +
-      '<p class="card-note">' + names + (list.length > 10 ? ' 等' : '') + '</p>' +
-      '<button class="btn btn-primary btn-block" data-act="start-due">' +
-      '就练这些（' + list.length + '）</button>' +
+  /* ====================== 「今天要做的」每日清单 ======================
+   *
+   * 家长的原话："我也不太清楚哪些是他今天应该做的。" 首页原来把该做的事
+   * 分散在四五张卡里（等家长批、今天到期、写错过的、开始写），每张单看都有道理，
+   * 合起来却答不了那个最简单的问题 —— **今天先干哪个**。
+   *
+   * 所以这里按优先级排成一列：订正（家长刚批错的，趁热改最有用）→ 复习（今天到期）
+   * → 今天还没练的那几类（字词、拼音、组词、多音字、默写）。
+   * 每一行都带一个按钮，点一下就直接开始那件事；做过的行变成"✓ 今天做过"。
+   *
+   * 以后要加新项目（改病句、按句意填词…）就往下面加一行 ——
+   * "今天做过没有"统一用 practicedTodayByKind() 这个口径，别再各写各的。
+   */
+  function todayStart() {
+    var d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  // 今天各类各练过几条。stats 的 key 是 keyOf(it) = "kind:文字"，
+  // lastAt 是"这一条最后一次练过（拍过或批过）的时间"。
+  function practicedTodayByKind() {
+    var st = app.state.stats || {};
+    var start = todayStart(), out = {};
+    Object.keys(st).forEach(function (k) {
+      var r = st[k];
+      if (!r || (r.lastAt || 0) < start) return;
+      var kind = String(k).split(':')[0];
+      out[kind] = (out[kind] || 0) + 1;
+    });
+    return out;
+  }
+
+  // 今天做过几道"当场判分"的题（多音字、默写）。它们不写 stats，
+  // 只落在 history 里 —— 两支队伍要一起看，不然这两种永远显示"还没做"。
+  function historyTodayByKind() {
+    var start = todayStart(), out = {};
+    (app.state.history || []).forEach(function (h) {
+      if ((h.ts || 0) < start) return;
+      var kind = String(h.kind || 'w');
+      out[kind] = (out[kind] || 0) + 1;
+    });
+    return out;
+  }
+
+  function todayRow(o) {
+    return '<div class="today-row' + (o.done ? ' done' : '') + '">' +
+      '<span class="today-mark">' + (o.done ? '✓' : o.no) + '</span>' +
+      '<span class="today-text"><b>' + esc(o.title) + '</b>' +
+      (o.sub ? '<i>' + esc(o.sub) + '</i>' : '') + '</span>' +
+      (o.done
+        ? '<span class="today-done">今天做过</span>'
+        : '<button class="btn btn-soft" data-act="' + o.act + '">' + esc(o.btn) + '</button>') +
       '</div>';
   }
+
+  function todayCard() {
+    var st = app.state;
+    var fb = st.feedback || [];
+    var redoN = fb.filter(function (f) { return !f.isCorrect && isRedoable(f); }).length;
+    var due = dueItems();
+    var pendingN = (st.pending || []).length;
+    var unit = st.unit;
+    var lesson = st.lesson || 'all';
+
+    var byKind = practicedTodayByKind();
+    var histKind = historyTodayByKind();
+    var todayN = Object.keys(byKind).reduce(function (s, k) { return s + byKind[k]; }, 0);
+
+    var items = itemsForLesson(unit, lesson);
+    var zuciItems = itemsForZuci(unit, lesson);
+    var polyN = itemsForPoly(unit).length;
+    var reciteN = itemsForRecite(unit).length;
+
+    var rows = [];
+    var no = 0;
+    var todoN = 0;   // 还没做的件数 —— 决定抬头写"今天要做的"还是"今天都做完了"
+    function add(o) {
+      if (!o.done) todoN++;
+      rows.push(todayRow(o));
+    }
+
+    // ① 订正：家长刚批错的。排第一位 —— 隔一天再改，他就只记得"我错过"，
+    //    记不清自己当时写成了什么样。
+    if (redoN) {
+      no++;
+      add({
+        no: no, title: '订正 ' + redoN + ' 条', sub: '家长刚批错的，趁热改',
+        btn: '马上订正', act: 'start-redo'
+      });
+    }
+    // ② 复习：SRS 今天到期的。把前几个字词名直接摆出来 ——
+    //    原来这张卡单独占一张（"今天该复习 N"），和清单里的入口重复，
+    //    并到一起之后少一张卡，具体是哪些字也照样看得到。
+    if (due.length) {
+      no++;
+      add({
+        no: no, title: '复习 ' + due.length + ' 条',
+        sub: due.slice(0, 6).map(function (it) { return it.text; }).join('、') +
+          (due.length > 6 ? ' 等' : ''),
+        btn: '就练这些', act: 'start-due'
+      });
+    }
+    // ③ 今天还没练的那几类。做过的显示"✓ 今天做过"，其余接着往下排。
+    if (items.length) {
+      no++;
+      add({
+        no: no, title: (st.mode === 'word2py' ? '写拼音 ' : '写字词 ') + items.length + ' 条',
+        sub: scopeTitle(), btn: '开始写', act: 'start',
+        done: !!(byKind.w || byKind.c)
+      });
+    }
+    if (zuciItems.length) {
+      no++;
+      add({
+        no: no, title: '组词 ' + zuciItems.length + ' 条', sub: '给字组词，一行一个',
+        btn: '开始练', act: 'start-zuci', done: !!byKind.z
+      });
+    }
+    if (polyN) {
+      no++;
+      add({
+        no: no, title: '多音字选读音 ' + polyN + ' 题', sub: '当场判分，不用等家长批',
+        btn: '开始做', act: 'start-poly', done: !!histKind.p
+      });
+    }
+    if (reciteN) {
+      no++;
+      add({
+        no: no, title: '默写 ' + reciteN + ' 句', sub: '日积月累 / 古诗，当场判分',
+        btn: '开始默写', act: 'start-recite', done: !!histKind.r
+      });
+    }
+
+    if (!rows.length) return '';
+
+    // 一行总结：今天练了多少、几条在等家长批 —— 孩子和家长都用得上这个数。
+    var line = [];
+    if (todayN) line.push('今天练了 ' + todayN + ' 条');
+    if (pendingN) line.push(pendingN + ' 条等家长批改');
+    if (!todoN && !line.length) line.push('今天的都做完了');
+
+    return '<div class="card card-today">' +
+      '<h2 class="card-title">' + (todoN ? '今天要做的' : '今天都做完了') + '</h2>' +
+      rows.join('') +
+      (line.length ? '<p class="card-note">' + esc(line.join(' · ')) + '</p>' : '') +
+      '</div>';
+  }
+
+  // 原来的「今天该复习」单独占一张卡，现在并进了「今天要做的」清单里
+  // （同一件事不必说两遍）。间隔复习的入口和说明都还在，只是不再另起一张卡 ——
+  // 这张卡原来是间隔复习唯一能被孩子看见的地方，并过去的时候别把这个入口弄丢。
 
   function viewHome() {
     var st = app.state;
@@ -1163,13 +1349,16 @@
             return '<span class="lesson-off">' + esc(label) +
               '（' + (ln.star ? '略读课文，无字词' : '本课没有字词') + '）</span>';
           }
-          // 练过的那一课标上"最后一次是哪天"：孩子一眼能看出哪几课动过、
-          // 哪几课还一次没碰，不用去翻记录。
+          // 练过的那一课标上"最后一次是哪天"，**今天练过的直接标"今天做过"**：
+          // 孩子和家长都要能一眼看出"这一课今天动过没有"，不用去翻记录。
           var at = lastAtOfItems(items);
           return '<button class="unit-btn' + (String(lesson) === String(ln.no) ? ' on' : '') +
             '" data-act="lesson" data-l="' + esc(ln.no) + '">' +
             esc(label) + '（' + n + '）' +
-            (at ? '<span class="when">' + esc(fmtDayShort(at)) + '</span>' : '') + '</button>';
+            (at >= todayStart()
+              ? '<span class="when done">今天做过</span>'
+              : (at ? '<span class="when">' + esc(fmtDayShort(at)) + '</span>' : '')) +
+            '</button>';
         }).join('');
     }
 
@@ -1183,9 +1372,11 @@
 
       feedbackCard() +
 
-      draftCard() +
+      // 「今天要做的」放最上面（家长刚批的那张卡之后）：它回答的就是
+      // "今天该做什么"，而原来这件事分散在四五张卡里，谁也答不上来。
+      todayCard() +
 
-      dueCard() +
+      draftCard() +
 
       progressCard() +
 
@@ -1358,7 +1549,14 @@
       : (isPy ? esc(it.py) : esc(it.text));
     var hint = isZ
       ? ('一行写一个词，共 ' + it.words + ' 个词（每个词 2～4 个字都行，写不满空着即可）')
-      : (isPy ? ('共 ' + n + ' 个字') : ('共 ' + n + ' 个音节'));
+      : (isPy ? ('共 ' + n + ' 个字') : ('共 ' + n + ' 个音节，一个音节占一格'));
+
+    // 「长按格子」那句要跟着题型说话：组词是"词"、看拼音写字是"字"，
+    // 看词语写拼音是"音节"。原来三种模式共用"那一个字"——
+    // 拼音题（四线三格）里孩子按提示去找"字"，当然找不到。
+    var cellNote = isZ
+      ? '长按格子可以只重写那一个词。'
+      : (isPy ? '长按格子可以只重写那一个字。' : '长按格子可以只重写那一个音节。');
 
     // 题目少 -> 进度点；题目多（按课全出后可能几十个）-> 进度条，免得点挤成一团
     var progress = total > 20
@@ -1370,9 +1568,12 @@
 
     // 家长批改时写的批注，下次再练到这个字时要摆出来 ——
     // 不然"崩少了山字头"这句话家长写完就再也没人看过。
+    // 但**只摆同一题型下的那一条**：写字时说的"不要乱出头"评的是字形，
+    // 拿到"看词语写拼音"上来提示，人家拼音题根本还没做过。
     var rec = (app.state.stats || {})[keyOf(it)];
-    var parentNote = rec && rec.note
-      ? '<div class="fb-note">家长上次说：' + esc(rec.note) + '</div>' : '';
+    var recNote = noteForMode(rec, modeOfItem(it));
+    var parentNote = recNote
+      ? '<div class="fb-note">家长上次说：' + esc(recNote) + '</div>' : '';
 
     // 订正这一轮：把"上次写成了什么样"摆在题目旁边。
     // 空口说"这个字写错了"，孩子想不起自己哪一写歪了；看见了，
@@ -1409,7 +1610,7 @@
       prevInk +
       '<div class="write-wrap"><canvas id="writeCanvas"></canvas></div>' +
       '<div class="py-hint">' + hint + '</div>' +
-      '<p class="card-note">长按格子可只重写那一个字。</p>' +
+      '<p class="card-note">' + cellNote + '</p>' +
       (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
       (app.submitMsg ? '<div class="feedback warn">' + esc(app.submitMsg) + '</div>' : '') +
       '<div class="action-row">' +
@@ -2311,9 +2512,15 @@
   // 这个字/词最近一次"写了、并且留下笔迹"的记录 —— 订正时要摆出来给孩子对照。
   function lastInkOf(it) {
     var k = keyOf(it);
+    var md = modeOfItem(it);
     var hist = app.state.history || [];
     for (var i = hist.length - 1; i >= 0; i--) {
-      if (hist[i].key === k && hist[i].strokes && hist[i].strokes.length) return hist[i];
+      var h = hist[i];
+      if (h.key !== k || !h.strokes || !h.strokes.length) continue;
+      // 笔迹也要按题型分：写字那一笔是汉字、拼音那一笔是字母，
+      // 拿写字的样子去给拼音订正，孩子看着对不上号
+      if ((h.mode || 'py2word') !== md) continue;
+      return h;
     }
     return null;
   }
@@ -2582,7 +2789,15 @@
       r.dueAt = Date.now();
     }
     r.lastAt = Date.now();
-    if (note) r.note = note;
+    if (note) {
+      // 批注按题型分开存：写字题的批注不会跑到拼音题上去（读的时候见 noteForMode）。
+      // 用 item.mode（写的那一刻钉在题上的）而不是当前模式 ——
+      // 家长往往是几天后才批，那会儿首页上选的可能已经是另一种题型了。
+      // note 这个老字段也一并写着，是为了兼容还没升上来的旧数据格式。
+      if (!r.notes || typeof r.notes !== 'object') r.notes = {};
+      r.notes[item.mode || modeOfItem(item)] = note;
+      r.note = note;
+    }
     app.state.stats[k] = r;
 
     // 存下原始笔迹：报告里要能回放"当时写的是什么"，光看汉字和拼音

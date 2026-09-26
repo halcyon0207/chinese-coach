@@ -13,6 +13,9 @@
   --warn-bg: #fdf3e3;
   --info: #2f6ba8;
   --info-bg: #eaf2fa;
+  /* "做对了 / 今天做过"用的绿：批改卡的写对、每日清单的已完成都靠它 */
+  --ok: #12a150;
+  --ok-bg: #e8f6ee;
   --radius: 16px;
   --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .04);
 }
@@ -31,6 +34,8 @@
     --warn-bg: #2a2113;
     --info: #6fa8dc;
     --info-bg: #16202c;
+    --ok: #35c07a;
+    --ok-bg: #14291f;
     --shadow: none;
   }
 }
@@ -174,7 +179,74 @@ html, body {
   border-radius: 999px;
 }
 
+/* ---------------- 「今天要做的」每日清单 ----------------
+   一列任务，每行 = 第几件 + 做什么 + 一个按钮。
+   做过的行整行变淡、打绿勾，孩子扫一眼就知道还剩哪几件没做。 */
+.card-today { border-left: 3px solid var(--primary); }
+.today-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.today-row:last-of-type { border-bottom: none; }
+.today-mark {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.today-row.done .today-mark { background: var(--ok-bg); color: var(--ok); }
+.today-text { flex: 1; min-width: 0; }
+.today-text b { display: block; font-size: 15px; }
+.today-text i {
+  display: block;
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.today-done { flex: none; font-size: 12.5px; font-weight: 700; color: var(--ok); }
+.today-row .btn { flex: none; }
+/* 课时按钮上的"今天做过" */
+.when.done { color: var(--ok); font-weight: 700; }
+
 /* 批改结果（给孩子看的反馈） */
+/* 摘要那一行：先给孩子两个数 —— 要订正几条、写对几条。
+   原来这两个数藏在长列表里，得滑到底才知道"我到底错了几个"。 */
+.fb-sum {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+.fb-chip {
+  display: inline-block;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.fb-chip.bad { background: var(--warn-bg); color: var(--warn); }
+.fb-chip.ok { background: var(--ok-bg, #e8f6ee); color: var(--ok, #12a150); }
+/* 要订正的那几条：给一句抬头，免得孩子把这一块当成"又在报错" */
+.fb-list { margin-top: 4px; }
+.fb-list-head {
+  margin: 10px 0 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
 .fb-row {
   display: flex;
   align-items: flex-start;
