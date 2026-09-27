@@ -265,9 +265,27 @@
   // 每道题都带上自己所属的 unit（跨单元时不能再用传进来的那个），
   // 否则复习排期、报告统计会全记到当前选中的单元名下。
   function unitsOf(unitId) {
+    // 数组 = 多选（"综合"点几个就是几个）
+    if (Array.isArray(unitId)) {
+      return unitId.map(function (id) { return D.byId(id); }).filter(Boolean);
+    }
     if (!unitId || unitId === 'all') return D.UNITS;
     var u = D.byId(unitId);
     return u ? [u] : [];
+  }
+
+  // 现在选中的单元（可多选）。出题、复习、首页统计都走它。
+  //
+  // 为什么是数组而不是"全部 / 单个"两档开关：家长的原话是"点亮一、二单元就出
+  // 一二单元的题，点一二三就出这三个单元的" —— 范围是要自己挑的。
+  function selUnits() {
+    var list = app.state.units;
+    if (Array.isArray(list) && list.length) {
+      var ok = list.filter(function (id) { return !!D.byId(id); });
+      if (ok.length) return ok;
+    }
+    var u = D.byId(app.state.unit);   // 老数据里只有单个 unit
+    return u ? [u.id] : [];
   }
 
   function itemsForLesson(unitId, lesson) {
@@ -487,7 +505,7 @@
   // 同一个字在两课里都出现时只算一条 —— 复习排期本来就是按"字词"记的，不是按课记的。
   function allItemsForScope(unitId, lesson) {
     var ls = lesson || 'all';
-    var units = (unitId && unitId !== 'all') ? [D.byId(unitId)] : D.UNITS;
+    var units = unitsOf(unitId);
     var seen = {}, out = [];
     units.forEach(function (u) {
       if (!u) return;
@@ -550,7 +568,8 @@
   function dueProgress() {
     var run = dueRun();
     if (!run) return null;
-    var same = (run.unit === app.state.unit) &&
+    // 批次属于"同一批范围"才认（范围可以是多个单元，用 join 出来的 key 比）
+    var same = ((run.scope || run.unit) === selUnits().join(',')) &&
       ((run.lesson || 'all') === (app.state.lesson || 'all'));
     if (!same || dueRunExpired(run)) return null;
     var done = run.done.filter(function (k) { return run.ids.indexOf(k) >= 0; }).length;
@@ -1152,6 +1171,12 @@
 
   function scopeTitle() {
     var st = app.state;
+    // 多选时把选中的单元都报出来："第一单元、第二单元" ——
+    // 不然孩子不知道这一轮到底在练哪些范围。
+    var ids = selUnits();
+    if (ids.length > 1) {
+      return ids.map(function (id) { return unitNameOf(id); }).join('、');
+    }
     if (!st.unit || st.unit === 'all') return '全部单元';
     var u = D.byId(st.unit);
     if (!u) return '';
@@ -1417,10 +1442,12 @@
     var byKind = practicedTodayByKind();
     var todayN = Object.keys(byKind).reduce(function (s, k) { return s + byKind[k]; }, 0);
 
-    var items = itemsForLesson(unit, lesson);
-    var zuciItems = itemsForZuci(unit, lesson);
-    var polyItems = itemsForPoly(unit);
-    var reciteItems = itemsForRecite(unit);
+    // 出题范围：可以是**多个单元** —— "综合"里自己点亮几个就是几个。
+    var units = selUnits();
+    var items = itemsForLesson(units, lesson);
+    var zuciItems = itemsForZuci(units, lesson);
+    var polyItems = itemsForPoly(units);
+    var reciteItems = itemsForRecite(units);
     var polyN = polyItems.length;
     var reciteN = reciteItems.length;
 
@@ -1667,17 +1694,17 @@
 
     // 先数清楚这个单元有没有题。没有就把按钮换成一句说明 ——
     // 点下去才说"没有内容"、还顺带把页面弹回顶部，是很糟糕的体验。
-    var polyCount = itemsForPoly(unit).length;
-    var reciteCount = itemsForRecite(unit).length;
+    var polyCount = itemsForPoly(selUnits()).length;
+    var reciteCount = itemsForRecite(selUnits()).length;
 
     // 单元按钮上带**累计进度**：家长打开页面第一个想知道的就是
     // "哪些单元练完了、哪些还没动" —— 原来这个信息哪儿都没有。
-    // 「综合」排在最前面：跨单元出题。错字、学过的字词不该因为"这一单元学完了"
-    // 就不再考 —— 复习本来就是跨单元的事，考前更该这么练。
-    var unitBtns = '<button class="unit-btn' +
-      ((!unit || unit === 'all') ? ' on' : '') +
-      '" data-act="unit" data-u="all">综合</button>' +
-      D.UNITS.map(function (u) {
+    // 单元**可以多选**：点第一单元和第二单元，就出这两个单元混着的题。
+    // 错字、学过的字词不该因为"这一单元学完了"就不再考 —— 复习本来就是跨单元的，
+    // 考前更该这么练。点一下选中、再点一下取消（至少留一个，不然没题可出）。
+    var selIds = selUnits();
+    var unitBtns = D.UNITS.map(function (u) {
+      var on = selIds.indexOf(u.id) >= 0;
       var p = progressOfItems(itemsForLesson(u.id, 'all'));
       var mark = '';
       if (p.total) {
@@ -1685,8 +1712,8 @@
           ? '<span class="when done">✓ 练完</span>'
           : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
       }
-      return '<button class="unit-btn' + (unit === u.id ? ' on' : '') +
-        '" data-act="unit" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + mark + '</button>';
+      return '<button class="unit-btn' + (on ? ' on' : '') +
+        '" data-act="unit-toggle" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + mark + '</button>';
     }).join('');
 
     var cur = D.byId(unit);
@@ -1715,7 +1742,7 @@
         }).join('');
     }
 
-    var total = itemsForLesson(unit, lesson).length;
+    var total = itemsForLesson(selUnits(), lesson).length;
 
     return '' +
       '<div class="hero">' +
@@ -1736,6 +1763,7 @@
 
       '<div class="card">' +
       '<h2 class="card-title">练哪个单元</h2>' +
+      '<p class="card-note">可以选多个 —— 点亮哪几个，就混着出这几个单元的题（再点一下取消）。</p>' +
       '<div class="unit-row">' + unitBtns + '</div>' +
       '</div>' +
 
@@ -2838,7 +2866,7 @@
 
   /* ============================== 动作 ============================== */
   function startSession() {
-    app.session = buildSession(app.state.unit, app.state.lesson);
+    app.session = buildSession(selUnits(), app.state.lesson);
     app.dueMode = false;   // 不是复习轮：做的题不往复习批次里记账
     app.cursor = 0;
     app.strokes = [];
@@ -2852,7 +2880,7 @@
 
   // 组词训练：从当前单元（或所选课）的二类字出题，写汉字用田字格
   function startZuci() {
-    var all = itemsForZuci(app.state.unit, app.state.lesson);
+    var all = itemsForZuci(selUnits(), app.state.lesson);
     if (!all.length) {
       app.message = '本单元二类字还没有组词数据，先去资料页看看。';
       return render();
@@ -2876,7 +2904,7 @@
   // 分流的理由是另一条：这两类题**有唯一正确答案**，硬让它们卡在队列里等家长，
   // 孩子当天就看不到对错，错了也没法马上订正。
   function startPoly() {
-    var all = itemsForPoly(app.state.unit);
+    var all = itemsForPoly(selUnits());
     if (!all.length) {
       app.message = '本单元还没有多音字数据。';
       return render();
@@ -2899,7 +2927,7 @@
   }
 
   function startRecite() {
-    var all = itemsForRecite(app.state.unit);
+    var all = itemsForRecite(selUnits());
     if (!all.length) {
       app.message = '这个单元还没有要背的内容，换个单元试试。';
       return render();
@@ -2923,12 +2951,13 @@
   // 顺序**固定在一个批次里**：第一次点会开一批（打乱一次就定下来），
   // 之后点进来是"接着上次做"，题目和顺序都不变；超过 2 小时才作废重来。
   function startDue() {
-    var unit = app.state.unit, lesson = app.state.lesson || 'all';
+    var scope = selUnits().join(',');   // 范围可以是多个单元，用这个比"是不是同一批"
+    var lesson = app.state.lesson || 'all';
     var run = dueRun();
     var restartMsg = '';
 
     // 换了范围 → 这一批不适用了，按新范围重新开一批
-    if (run && (run.unit !== unit || (run.lesson || 'all') !== lesson)) run = null;
+    if (run && ((run.scope || run.unit) !== scope || (run.lesson || 'all') !== lesson)) run = null;
 
     // 过了时限 → 作废重来：**还是原来那一批**（全量重做），
     // 只是顺序重新打乱、已做的清零。这里不再去数一遍"现在还有哪些到期"——
@@ -2937,7 +2966,7 @@
       restartMsg = '上次没在 2 小时内做完，这一批重新打乱，从头来一遍。';
       var rngR = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
       run = {
-        unit: unit,
+        scope: scope,
         lesson: lesson,
         ids: shuffle(rngR, run.ids.slice()),
         done: [],
@@ -2948,7 +2977,7 @@
     }
 
     if (!run) {
-      var list = dueItems(unit, lesson);
+      var list = dueItems(selUnits(), lesson);
       if (!list.length) {
         // 数据被别处改过（比如刚在另一台设备上批完）时走到这儿，别把孩子丢进空题目
         app.message = '这个范围里没有到期的，练点别的也一样。';
@@ -2957,7 +2986,7 @@
       var rng0 = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
       var ordered = orderByDue(rng0, list);
       run = {
-        unit: unit,
+        scope: scope,              // 范围（可能不止一个单元）—— 换了范围这一批就作废
         lesson: lesson,
         ids: ordered.map(keyOf),   // 顺序在这一刻定下来，之后不再动
         done: [],
@@ -2969,7 +2998,7 @@
 
     // 按批次里的顺序取还没做的那些
     var idx = {};
-    allItemsForScope(unit, lesson).forEach(function (it) { idx[keyOf(it)] = it; });
+    allItemsForScope(selUnits(), lesson).forEach(function (it) { idx[keyOf(it)] = it; });
     var left = run.ids
       .filter(function (k) { return run.done.indexOf(k) < 0; })
       .map(function (k) { return idx[k]; })
@@ -3600,11 +3629,34 @@
 
     if (typeof t.blur === 'function') t.blur();
 
+    // 单元**多选**（首页）：点一下选中、再点一下取消，至少留一个 ——
+    // 一个都不选就没题可出了。
+    if (act === 'unit-toggle') {
+      var tid = t.getAttribute('data-u');
+      if (!D.byId(tid)) return render();
+      var cur = selUnits().slice();
+      var pos = cur.indexOf(tid);
+      if (pos >= 0) {
+        if (cur.length > 1) cur.splice(pos, 1);
+      } else {
+        cur.push(tid);
+      }
+      // 按单元顺序排好："第一、二单元"读着顺，不然会出现"第三、一单元"
+      var order = D.UNITS.map(function (x) { return x.id; });
+      cur.sort(function (a, b) { return order.indexOf(a) - order.indexOf(b); });
+      app.state.units = cur;
+      app.state.unit = cur[0];      // 报告页、识字表页仍按第一个看
+      app.state.lesson = 'all';     // 范围变了，课时退回"整个单元"
+      saveState();
+      return render();
+    }
     if (act === 'unit') {
       var nu = t.getAttribute('data-u') || 'U1';
       // 换单元就把课时退回"整个单元"，否则会停在上一单元那个课次上，题是空的
       if (nu !== app.state.unit) app.state.lesson = 'all';
       app.state.unit = nu;
+      // 单选（识字表组词页那边）：把多选也收成这一个，两处别各说各的
+      app.state.units = [nu];
       saveState();
       return render();
     }

@@ -21,7 +21,10 @@
   function defaultState() {
     return {
       version: 1,
-      unit: 'U1',        // 当前练的单元
+      unit: 'U1',        // 当前练的单元（= 选中的第一个，报告页/识字表页仍按它看）
+      // 选中的单元可以不止一个：点亮第一、二单元就出这两个单元的题。
+      // 用一个数组而不是"全部/单个"两档开关 —— 范围是该自己挑的。
+      units: ['U1'],
       lesson: 'all',     // 当前练的课时，'all' = 整个单元
       mode: 'py2word',   // 看拼音写词语 / 看词语写拼音。以前没存，重开页面就跳回默认
       passcode: '',      // 家长口令，空 = 还没设置
@@ -54,6 +57,14 @@
   function arr(v, dflt) { return Array.isArray(v) ? v : dflt; }
   function str(v, dflt) { return typeof v === 'string' && v ? v : dflt; }
 
+  // 选中的单元：非空的字符串数组。空数组或形状不对就退回 [unit] ——
+  // 一个都不选的话就出不了题，那比"回到第一个单元"更糟。
+  function unitList(v, dflt) {
+    if (!Array.isArray(v)) return dflt;
+    var out = v.filter(function (k) { return typeof k === 'string' && k; });
+    return out.length ? out : dflt;
+  }
+
   // 复习批次的形状要能放心用：ids 必须是非空的字符串数组，done / startedAt 也要对。
   // 形状不对就当没有这一批（宁可从新开始），否则孩子会被丢进一场空题目 ——
   // ids 里全是别的东西时，app.js 按 key 找不到任何条目。
@@ -81,6 +92,7 @@
       return {
         version: s.version || d.version,
         unit: str(s.unit, d.unit),
+        units: unitList(s.units, [str(s.unit, d.unit)]),
         lesson: str(s.lesson, '') || 'all',
         mode: (s.mode === 'word2py') ? 'word2py' : 'py2word',
         passcode: str(s.passcode, ''),
