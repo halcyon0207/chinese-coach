@@ -1621,8 +1621,12 @@
       // 这个按钮是给"我想早点让家长看到"用的：点一下把已经写好的**一起**交上去。
       '<div class="action-row">' +
       '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
-      '<button class="btn btn-soft" data-act="submit-work">提交给家长批改' +
-      (pendingCount ? '（' + pendingCount + '）' : '') + '</button>' +
+      // 传到一半时这个按钮要变灰：再点一次不会有第二趟（flushWork 会挡住），
+      // 界面上却毫无变化 —— 孩子只会以为坏了，然后一直点。
+      '<button class="btn btn-soft" data-act="submit-work"' +
+      (app.submitting ? ' disabled' : '') + '>' +
+      (app.submitting ? '正在提交…' : '提交给家长批改' + (pendingCount ? '（' + pendingCount + '）' : '')) +
+      '</button>' +
       '</div>' +
       '<p class="card-note">' + (pendingCount
         ? '写好 ' + pendingCount + ' 条了，点上面那个按钮才传 —— 不会自动上传。'
@@ -2384,6 +2388,14 @@
       }
 
       if (app.view !== 'parent') return;
+
+      // 手动点「看看有没有新作业」时：内容没变、而家长**正在写批注**，就一个字都不重绘。
+      // 批注的文字不会丢（输入框的 value 每次输入都同步进 app.note），
+      // 但重绘会把焦点从输入框上拿走 —— 正打着字被打断，很烦。
+      if (opts && opts.manual && !changed && app.note) {
+        app.message = '没有新交上来的作业 —— 你正在写的批注原样留着。';
+        return;
+      }
       if (changed || !opts || opts.manual) render();
     }).catch(function () { /* 失败就只批本机的，不打断家长 */ });
   }
@@ -2583,7 +2595,12 @@
         '之后提交就能传到家长手机上；现在写的这些留在本机，家长在这台设备上也能批。';
       return render();
     }
-    app.submitMsg = '正在提交…';
+    // 一次提交要分好几批、全程可能半分钟。这期间**再点一次不能有任何反应** ——
+    // 第二趟会被 flushWork 挡住（dirty 已经清了），界面上却什么变化都没有，
+    // 孩子只会以为"点了没用"，然后一直点。所以这里记一个状态：按钮变灰，话说清楚。
+    if (app.submitting) return render();
+    app.submitting = true;
+    app.submitMsg = '正在提交…（别急，一次就好）';
     render();
     F.markWorkDirty();
     // 六十多条要分几批传，每批都要云端"读一遍、写一遍"，全程可能半分钟。
@@ -2594,15 +2611,22 @@
         '（已传 ' + p.sent + ' / ' + p.total + ' 条）';
       render();
     }).then(function (r) {
+      app.submitting = false;      // 这一趟走完了，按钮恢复
       if (r && r.ok) {
         // 云端装不下的那部分不能只说一句"已提交"就算完 —— 家长会以为全收到了，
         // 结果看不到几条，还以为是自己点错了。
         var full = (r && r.full) || 0;
-        app.submitMsg = '已提交 ' + (n - full) + ' 条。家长在另一台设备上打开就能批改了。'
-          + (full
-            ? '还有 ' + full + ' 条排队的太长，云端一次装不下 —— 让家长先批掉这批，' +
-              '再点一次「提交给家长批改」就能把剩下的带上去（那些还好好留在这台设备上）。'
-            : '');
+        app.submitMsg = r.skipped
+          // 这一趟**一个请求都没发**（没有新写的，或者这些早就在云端了）。
+          // 这时候说"已提交 N 条"是在骗人 —— 家长那头看到的是上一次的东西，
+          // 而他会以为这次全传上去了。所以照实说，并把下一步指出来。
+          ? '这次没有要新传的作业：之前写好的那些应该已经在家长那头了。' +
+            '要是他在手机上还是看不到，让他点一下批改页的「看看有没有新作业」。'
+          : ('已提交 ' + (n - full) + ' 条。家长在另一台设备上打开就能批改了。'
+            + (full
+              ? '还有 ' + full + ' 条排队的太长，云端一次装不下 —— 让家长先批掉这批，' +
+                '再点一次「提交给家长批改」就能把剩下的带上去（那些还好好留在这台设备上）。'
+              : ''));
         // 顺带把统计快照也推上去 —— 家长在自己手机上打开报告，那些数字才不是空的
         F.pushReport(reportSnapshot());
       } else {
@@ -3317,6 +3341,10 @@
           if (acked.length) app.acked = (app.acked || []).concat(acked);
         },
         onStatus: function () { if (app.view === 'report') render(); },
+        // cloud.js 里"还有东西没传上去 / 传完了"这两种状态都要立刻落盘：
+        // 提交到一半被关掉（或页面被刷新）时，靠的就是本机这个标记，
+        // 下次打开才知道要把剩下的补上去。
+        onSave: function () { saveState(); },
         // 两个家长同时批的时候会撞车：服务端保证"先到为准"，
         // 这里把撞上的条数说一句，顺便把队列刷新成最新的。
         onGraded: function (data) {

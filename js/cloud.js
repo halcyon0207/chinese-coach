@@ -110,21 +110,47 @@
     return (typeof AbortController === 'function') ? new AbortController() : null;
   }
 
+  // 明确离线就别发。注意反过来不成立：onLine 为 true 也可能连不上
+  // （连上了 WiFi 但没有互联网），那种还是照发，超时归超时。
+  // 这一层只为省掉"明知道没网还干等 25 秒" —— 那段时间界面上什么都没有，
+  // 家长只能干等，还以为提交已经在跑了。
+  function offline() {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
+  }
+
   // 所有请求都从这里走：超时就放弃（不阻塞），失败只记一句状态
   function post(body) {
     body.v = API_VERSION;
     body.app = APP;   // 语文 / 数学共用同一个家庭码，靠这个隔开两边的数据
+    if (offline()) return Promise.reject(new Error('现在没网'));
+
     var ctl = setTimeoutFetch();
     var opts = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     };
-    if (ctl) {
-      opts.signal = ctl.signal;
-      setTimeout(function () { try { ctl.abort(); } catch (e) {} }, TIMEOUT);
-    }
-    return fetch(API_BASE, opts).then(function (r) {
+    if (ctl) opts.signal = ctl.signal;
+
+    // 超时必须**自己兜住**，不能指望 AbortController：
+    // 1) 不支持它的浏览器（老平板上的旧 Safari）压根没有超时 —— fetch 一直挂着，
+    //    这个 Promise 永远不返回，界面就永远停在"正在提交…"，而家长那头永远收不到；
+    // 2) 就算支持，abort 之后 fetch 什么时候 reject 由浏览器决定，不是我们说了算。
+    // 所以再用 Promise.race 加一道：到点一定给调用方一个结果（失败也是一种结果）。
+    // abort 保留着 —— 能把那个请求真的掐掉，省下这一路的流量和时间。
+    var req = fetch(API_BASE, opts);
+    var timer = null;
+    var guard = new Promise(function (_, rej) {
+      timer = setTimeout(function () {
+        try { if (ctl) ctl.abort(); } catch (e) {}
+        rej(new Error('超时'));
+      }, TIMEOUT);
+    });
+
+    function done(r) { clearTimeout(timer); return r; }
+    function fail(e) { clearTimeout(timer); throw e; }
+
+    return Promise.race([req, guard]).then(done, fail).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     }).then(function (j) {
@@ -139,6 +165,12 @@
     if (hooks.onStatus) hooks.onStatus();
   }
 
+  // 这一把锁**现在没有调用点**：flushWork / flushGrades 都是直接跑的。
+  // 并发安全靠的是另外两层，别误以为靠它：
+  //   · 作业流 —— flushWork 一进来就把 dirty 清掉，第二次调用会被 skipped 挡住；
+  //   · 批改流 —— flushGrades 先把 outbox 截走，第二次进来拿到的是剩下的那批。
+  // 留着它是为了以后要加"自动重试"时有个现成的串行口子；
+  // 真到那时候再按流分开（作业 / 批改 / 报告各一把），一把全局锁会互相拖累。
   function ok(fn) {
     if (!on() || busy) return;
     busy = true;
@@ -236,6 +268,16 @@
     var s = sync();
     if (!s) return;
     s.dirty = true;
+    // 这个标记**必须落盘**。它是"还有东西没传上去"的唯一凭据 ——
+    // 只改内存的话，提交传到一半被关掉（或页面被刷新），下次进来 dirty 又变回 false，
+    // 那批作业就再也不会自动补传了，除非有人想起来再点一次「提交给家长批改」。
+    save();
+  }
+
+  // 存盘交给界面层（localStorage 在 app.js 那边），这里只有一个钩子。
+  // 没有钩子时（比如测试里）就只改内存，行为照旧。
+  function save() {
+    if (hooks.onSave) { try { hooks.onSave(); } catch (e) {} }
   }
 
   function workPayload() {
@@ -268,7 +310,11 @@
   function postOnce(body) {
     return post(body).catch(function (e) {
       var m = (e && e.message) || '';
-      if (/429|频繁/.test(m)) throw e;
+      // 超时也**不**重试：它通常意味着这一路就是慢/卡住了，再等一轮（25 秒 + 25 秒）
+      // 只会让界面在"正在提交…"上挂上一分钟，家长什么反馈都拿不到。
+      // 立刻失败反而好 —— 界面马上说"没提交上去（超时）"，
+      // 而断点续传记账已经落在本机，再点一次只补没传完的那部分。
+      if (/429|频繁|超时/.test(m)) throw e;
       return new Promise(function (res) { setTimeout(res, 1200); }).then(function () {
         return post(body);
       });
@@ -349,12 +395,14 @@
     return chain.then(function () {
       lastError = '';
       s.workPushed = [];
+      save();                  // 传完了：把"还有没传的"这份账销掉
       if (grades.length && hooks.applyGrades) hooks.applyGrades(grades);
       if (hooks.onStatus) hooks.onStatus();
       return { ok: true, count: all.length, batches: batches.length, full: full };
     }).catch(function (e) {
       s.dirty = true;          // 下次联网再补
       s.workPushed = doneIds;  // 已经上去的那些记下来，下次只补剩下的
+      save();                  // 同上：不落盘的话，这次失败就再也没人记得要补
       note(e);
       return { ok: false, error: lastError, sent: doneIds.length, total: all.length };
     });
@@ -379,11 +427,16 @@
 
     var list = s.outbox.slice();
     s.outbox = [];
+    // 立刻落盘：这一刻起"待发的批改"已经是空的了。
+    // 不存的话，post() 那 25 秒里要是页面被关掉，下次打开 outbox 里还有这同一批 ——
+    // 会再发一次（服务端幂等，不会批错，但白白多一趟请求）。
+    save();
     // dev 是"谁在批"（这台设备），grades 里的 dev 是"作业来自哪台设备"——两个不是一回事。
     // 少了外层这个 dev，服务端会以"设备标识不合法"直接拒掉。
     return post({ action: 'grade.push', fam: s.fam, dev: s.dev, grades: list })
       .then(function (data) {
         lastError = '';
+        save();   // 传完再存一次：万一上面那次没写成，这里兜住
         // 回调单独包一层：它要是炸了，不该让"已经交上去的批改"被回滚重发。
         // 网络失败和回调出错是两回事，别混在一起。
         try {
@@ -396,6 +449,7 @@
       })
       .catch(function (e) {
         s.outbox = list.concat(s.outbox || []);   // 没传上去，下次再补
+        save();                                   // 同上：这笔账要在本机
         note(e);
         return { ok: false, error: lastError };
       });
@@ -495,11 +549,14 @@
     if (lastError) return '同步暂不可用（' + lastError + '），数据还在本机';
     if (!s.lastAt) return '已开启，还没同步过';
     var min = Math.floor((nowTs() - s.lastAt) / 60000);
-    if (min < 1) return '已同步 · 刚刚';
-    if (min < 60) return '已同步 · ' + min + ' 分钟前';
+    // 说"已发出"而不是"已同步"：这里记录的只是**这台设备最后一次把请求发出去**的时间，
+    // 不代表对方已经收到了。写"已同步"的话，家长会以为孩子那边已经看到批改结果，
+    // 实际上可能还在路上（或者根本没送到）。
+    if (min < 1) return '已发出 · 刚刚';
+    if (min < 60) return '已发出 · ' + min + ' 分钟前';
     var hr = Math.floor(min / 60);
-    if (hr < 24) return '已同步 · ' + hr + ' 小时前';
-    return '已同步 · ' + Math.floor(hr / 24) + ' 天前';
+    if (hr < 24) return '已发出 · ' + hr + ' 小时前';
+    return '已发出 · ' + Math.floor(hr / 24) + ' 天前';
   }
 
   root.FamilySync = {
