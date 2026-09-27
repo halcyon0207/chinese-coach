@@ -116,20 +116,29 @@
     return (r && r.lastAt) || 0;
   }
 
-  // 一组题里最近的那次练习日期。首页课时按钮上用它标"哪天练过"。
-  function lastAtOfItems(list) {
-    var at = 0;
-    (list || []).forEach(function (it) {
-      var t = lastAtOf(it);
-      if (t > at) at = t;
+  // 今天写完、还在等家长批的那些（pending 里的作业）。
+  //
+  // 手写题写完**只进 pending**，要等家长批改才记进 stats（见 submitWriting 的理由：
+  // 没批改的东西不能进掌握度）。于是"孩子把第一课 23 条全写完、家长还没批"的时候，
+  // 只看 stats 的话，页面上同时出现两个答案：清单说"还没练过"、
+  // 课时按钮（另一套算法）给出另一个数 —— 家长不知道该信谁。
+  //
+  // 根子是两件事被混在一起了：**练没练是孩子的事，批没批是家长的事**。
+  // 所以这里把它们分开：写完就算练过（pending 也算），只是不进掌握度。
+  function pendingTodayKeys() {
+    var start = todayStart(), out = {};
+    (app.state.pending || []).forEach(function (p) {
+      if ((p.ts || 0) < start) return;
+      var it = p.item;
+      if (it && it.kind && it.text) out[keyOf(it)] = 1;
     });
-    return at;
+    return out;
   }
 
   // 这一摊（一个单元 / 一课 / 一类题）练到什么程度了。
   //
   // done   —— 累计练过多少条（有记录就算，不管哪天）
-  // today  —— 今天练过多少条
+  // today  —— 今天练过多少条（含"写完还在等家长批的"）
   // goal   —— 今天做多少条才算"今天练过这一项"
   //
   // 门槛取"一轮的量"（SESSION_SIZE）和"这一摊总数"里小的那个。
@@ -140,8 +149,10 @@
   function progressOfItems(items) {
     var list = items || [];
     var start = todayStart(), done = 0, today = 0;
+    var pend = pendingTodayKeys();
     list.forEach(function (it) {
       var at = lastAtOf(it);
+      if (at === 0 && pend[keyOf(it)]) at = start;   // 写完还没批的，算今天练的
       if (at > 0) done++;
       if (at >= start) today++;
     });
@@ -1378,7 +1389,8 @@
    * 每一行都带一个按钮，点一下就直接开始那件事；做过的行变成"✓ 今天做过"。
    *
    * 以后要加新项目（改病句、按句意填词…）就往下面加一行 ——
-   * "今天做过没有"统一用 practicedTodayByKind() 这个口径，别再各写各的。
+   * "这一摊今天练过没有"统一用 progressOfItems(这一摊的题目)，别再各写各的：
+   * 以前清单看 kind、课时按钮看 lastAt，同一件事会给出两个答案（见 v0.8.8）。
    */
   function todayStart() {
     var d = new Date();
@@ -1388,6 +1400,7 @@
 
   // 今天各类各练过几条。stats 的 key 是 keyOf(it) = "kind:文字"，
   // lastAt 是"这一条最后一次练过（拍过或批过）的时间"。
+  // 写完还在等家长批的（pending）同样算进来 —— 见 pendingTodayKeys 的理由。
   function practicedTodayByKind() {
     var st = app.state.stats || {};
     var start = todayStart(), out = {};
@@ -1397,21 +1410,8 @@
       var kind = String(k).split(':')[0];
       out[kind] = (out[kind] || 0) + 1;
     });
-    return out;
-  }
-
-  // 今天做过几道"当场判分"的题（多音字、默写）。它们不写 stats，
-  // 只落在 history 里 —— 两支队伍要一起看，不然这两种永远显示"还没做"。
-  //
-  // 按当前单元数（unit 传 'all' 或空就是全局）：这里那个"今天 3/10 题"
-  // 是给当前单元那一行看的，把别的单元做的算进来，切个单元数字就变了。
-  // 老记录没有 unit 字段，那种照旧算进来 —— 宁可多算一条，也别把它藏掉。
-  function historyTodayByKind(unit) {
-    var start = todayStart(), out = {};
-    (app.state.history || []).forEach(function (h) {
-      if ((h.ts || 0) < start) return;
-      if (unit && unit !== 'all' && h.unit && h.unit !== unit) return;
-      var kind = String(h.kind || 'w');
+    Object.keys(pendingTodayKeys()).forEach(function (k) {
+      var kind = String(k).split(':')[0];
       out[kind] = (out[kind] || 0) + 1;
     });
     return out;
@@ -1445,13 +1445,14 @@
       (run0.lesson || 'all') === lesson && dueRunExpired(run0));
 
     var byKind = practicedTodayByKind();
-    var histKind = historyTodayByKind(unit);
     var todayN = Object.keys(byKind).reduce(function (s, k) { return s + byKind[k]; }, 0);
 
     var items = itemsForLesson(unit, lesson);
     var zuciItems = itemsForZuci(unit, lesson);
-    var polyN = itemsForPoly(unit).length;
-    var reciteN = itemsForRecite(unit).length;
+    var polyItems = itemsForPoly(unit);
+    var reciteItems = itemsForRecite(unit);
+    var polyN = polyItems.length;
+    var reciteN = reciteItems.length;
 
     var rows = [];
     var no = 0;
@@ -1529,26 +1530,26 @@
         done: pz.ok
       });
     }
+    // 多音字 / 默写也一样走统一口径（原来它们数的是 history，
+    // 和上面几行按 stats 算的不是同一套账，同一个页面上两套标准）。
     if (polyN) {
       no++;
-      var polyToday = histKind.p || 0;
-      var polyGoal = Math.min(SESSION_SIZE, polyN);
+      var pp = progressOfItems(polyItems);
       add({
         no: no, title: '多音字选读音 ' + polyN + ' 题',
-        sub: '当场判分，不用等家长批 · 今天 ' + polyToday + '/' + polyGoal + ' 题',
-        btn: polyToday ? '继续做' : '开始做', act: 'start-poly',
-        done: polyToday >= polyGoal
+        sub: '当场判分，不用等家长批 · ' + progressLine(pp),
+        btn: pp.today ? '继续做' : '开始做', act: 'start-poly',
+        done: pp.ok
       });
     }
     if (reciteN) {
       no++;
-      var rcToday = histKind.r || 0;
-      var rcGoal = Math.min(SESSION_SIZE, reciteN);
+      var pr = progressOfItems(reciteItems);
       add({
         no: no, title: '默写 ' + reciteN + ' 句',
-        sub: '日积月累 / 古诗，当场判分 · 今天 ' + rcToday + '/' + rcGoal + ' 句',
-        btn: rcToday ? '继续默写' : '开始默写', act: 'start-recite',
-        done: rcToday >= rcGoal
+        sub: '日积月累 / 古诗，当场判分 · ' + progressLine(pr),
+        btn: pr.today ? '继续默写' : '开始默写', act: 'start-recite',
+        done: pr.ok
       });
     }
 
