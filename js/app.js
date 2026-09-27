@@ -48,6 +48,10 @@
     // 这一轮是不是"订正"（把家长刚批错的重写一遍）。订正轮次里会在题目旁边
     // 摆出"你上次写成了什么样"，正常练习时不摆。
     redo: false,
+    // 这一轮是不是"复习这一批"（从首页「就练这些 / 继续复习」进来的）。
+    // 只有复习轮里做的事，才往 dueRun 那一批里记账 ——
+    // 别的入口做题不该动复习的进度（不然首页那个"已做 / 剩余"就假了）。
+    dueMode: false,
     // 本次渲染要回放笔迹的小画布列表：由视图函数填好，render() 负责铺开
     _miniReplay: [],
     // 返回首页时要滚回哪儿 —— 见 onClick 里的记录（null = 用默认的滚到页首）
@@ -115,6 +119,38 @@
       if (t > at) at = t;
     });
     return at;
+  }
+
+  // 这一摊（一个单元 / 一课 / 一类题）练到什么程度了。
+  //
+  // done   —— 累计练过多少条（有记录就算，不管哪天）
+  // today  —— 今天练过多少条
+  // goal   —— 今天做多少条才算"今天练过这一项"
+  //
+  // 门槛取"一轮的量"（SESSION_SIZE）和"这一摊总数"里小的那个。
+  // 为什么不是"练过一条就算"：孩子只写了一个字，首页就写"今天做过"，
+  // 家长会以为这一课练完了 —— 原来就是这么骗人的。
+  // 为什么也不是"全部练完才算"：80 条字词一次根本练不完，
+  // 那样这个标记永远不会亮，等于没有。
+  function progressOfItems(items) {
+    var list = items || [];
+    var start = todayStart(), done = 0, today = 0;
+    list.forEach(function (it) {
+      var at = lastAtOf(it);
+      if (at > 0) done++;
+      if (at >= start) today++;
+    });
+    var total = list.length;
+    var goal = Math.min(SESSION_SIZE, total || SESSION_SIZE);
+    return { done: done, today: today, total: total, goal: goal, ok: today >= goal };
+  }
+
+  // 一行进度说明。今天动过就报今天的（对着"一轮"这个目标看），
+  // 还没动就报累计的 —— 家长想知道"还剩多少"时用得上。
+  function progressLine(p) {
+    if (p.today) return '今天 ' + p.today + '/' + p.goal + ' 条';
+    if (p.done) return '已练 ' + p.done + '/' + p.total + ' 条';
+    return '还没练过';
   }
 
   function unitNameOf(id) {
@@ -305,26 +341,103 @@
       .concat(shuffle(rng, fresh), shuffle(rng, rest));
   }
 
-  // 今天到期的题，跨全部单元一起数。首页那句「今天该复习」和「就练这些」都用它。
-  //
-  // 以前"到期"只体现在排队顺序里：引擎自己知道，孩子看不见 ——
-  // 看不见就不会去点，间隔复习排得再准也白搭（报告里那个数字只有家长看得到）。
-  // 同一个字在两课里都出现时算一条（复习排期本来就是按"字词"记的，不是按课记的）。
-  function dueItems() {
-    var now = Date.now();
-    var st = app.state.stats || {};
+  // 某个范围里的全部条目（字词 + 组词 + 多音字 + 默写）。
+  // 同一个字在两课里都出现时只算一条 —— 复习排期本来就是按"字词"记的，不是按课记的。
+  function allItemsForScope(unitId, lesson) {
+    var ls = lesson || 'all';
+    var units = (unitId && unitId !== 'all') ? [D.byId(unitId)] : D.UNITS;
     var seen = {}, out = [];
-    D.UNITS.forEach(function (u) {
-      itemsForLesson(u.id, 'all')
-        .concat(itemsForZuci(u.id, 'all'), itemsForPoly(u.id), itemsForRecite(u.id))
+    units.forEach(function (u) {
+      if (!u) return;
+      itemsForLesson(u.id, ls)
+        .concat(itemsForZuci(u.id, ls), itemsForPoly(u.id), itemsForRecite(u.id))
         .forEach(function (it) {
           var k = keyOf(it);
           if (seen[k]) return;
-          var r = st[k];
-          if (r && r.dueAt && r.dueAt <= now) { seen[k] = 1; out.push(it); }
+          seen[k] = 1;
+          out.push(it);
         });
     });
     return out;
+  }
+
+  // 今天到期的题。首页那句「复习 N 条」和「就练这些」都用它。
+  //
+  // 以前"到期"只体现在排队顺序里：引擎自己知道，孩子看不见 ——
+  // 看不见就不会去点，间隔复习排得再准也白搭（报告里那个数字只有家长看得到）。
+  //
+  // **按当前范围数**（单元 + 课时）：原来这里是跨全部单元一起数的，
+  // 于是切到哪个单元首页都写着同一句"复习 120 条"—— 那是全局的数，
+  // 跟眼前这个单元没关系。范围选"全部"时才真是全局。
+  function dueItems(unitId, lesson) {
+    var now = Date.now();
+    var st = app.state.stats || {};
+    return allItemsForScope(unitId, lesson).filter(function (it) {
+      var r = st[keyOf(it)];
+      return !!(r && r.dueAt && r.dueAt <= now);
+    });
+  }
+
+  /* ---------------------- 这一批复习：顺序固定 + 限时 ----------------------
+   *
+   * 家长的原话："点进去、再退出来，里面就是新的排序了。"
+   * 原来每次点「就练这些」都用当前时间当种子重新打乱 —— 于是：
+   *   · 孩子做到第 30 条想歇一下，回来发现顺序全变了，也说不清自己做到哪；
+   *   · 首页也没法显示"还剩多少"，因为那一批压根不存在，只是每次现算的。
+   *
+   * 现在点进「就练这些」会**开一个批次**存在本机：题目（ids）和顺序都定下来，
+   * 做一条记一条。2 小时内随时接着做，顺序和进度都不变。
+   *
+   * 超过 2 小时就作废、重新打乱、从头来一遍 —— 这一条是刻意的：
+   * 复习的价值就在"连着过一遍"，拖成好几天做完等于没做；
+   * 而且拖久了哪些做过、哪些没有，孩子自己也记不清，不如重来一遍干净。
+   */
+  var DUE_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+  function dueRun() {
+    var r = app.state.dueRun;
+    return (r && Array.isArray(r.ids) && r.ids.length) ? r : null;
+  }
+
+  function dueRunExpired(run) {
+    return !run || (Date.now() - (run.startedAt || 0)) > DUE_WINDOW_MS;
+  }
+
+  // 这一批复习的进度 —— 只在"批次属于当前范围、而且没过期"时算数。
+  // 首页那一行靠它显示"已做 / 剩余"。
+  function dueProgress() {
+    var run = dueRun();
+    if (!run) return null;
+    var same = (run.unit === app.state.unit) &&
+      ((run.lesson || 'all') === (app.state.lesson || 'all'));
+    if (!same || dueRunExpired(run)) return null;
+    var done = run.done.filter(function (k) { return run.ids.indexOf(k) >= 0; }).length;
+    return {
+      total: run.ids.length,
+      done: done,
+      left: Math.max(run.ids.length - done, 0),
+      until: (run.startedAt || 0) + DUE_WINDOW_MS
+    };
+  }
+
+  // 复习轮里做完一条，就在这一批里记一笔。
+  // 只认这一批里的条目：别的入口（正常练习、组词…）做题不该动复习的账。
+  function markDueDone(item) {
+    if (!app.dueMode) return;
+    var run = dueRun();
+    if (!run) return;
+    var k = keyOf(item);
+    if (run.ids.indexOf(k) < 0) return;
+    if (run.done.indexOf(k) >= 0) return;
+    run.done.push(k);
+    saveState();
+  }
+
+  // 还剩几分钟（给首页那句"还有 X 分钟"用）
+  function fmtLeft(until) {
+    var min = Math.max(0, Math.round((until - Date.now()) / 60000));
+    if (min >= 60) return Math.floor(min / 60) + ' 小时' + (min % 60 ? (min % 60) + ' 分' : '');
+    return min + ' 分钟';
   }
 
   function buildSession(unitId, lesson) {
@@ -1100,6 +1213,9 @@
       unit: app.state.unit,
       lesson: app.state.lesson,
       itemMode: app.state.mode,
+      // 复习轮的中断也要能接着做，而且**接着记账** ——
+      // 不存这一位的话，恢复后 app.dueMode 变回 false，那几条就不算进"已做"里了
+      dueMode: app.dueMode,
       cursor: app.cursor,
       typed: app.typed || '',
       roundOk: app.roundOk || 0,
@@ -1136,6 +1252,7 @@
     app.state.unit = d.unit || app.state.unit;
     app.state.lesson = d.lesson || app.state.lesson;
     app.state.mode = d.itemMode || app.state.mode;
+    app.dueMode = !!d.dueMode;   // 复习轮被打断：接着做，也接着记账
     app.message = '';
     app.submitMsg = '';
     app.view = 'practice';
@@ -1198,10 +1315,15 @@
 
   // 今天做过几道"当场判分"的题（多音字、默写）。它们不写 stats，
   // 只落在 history 里 —— 两支队伍要一起看，不然这两种永远显示"还没做"。
-  function historyTodayByKind() {
+  //
+  // 按当前单元数（unit 传 'all' 或空就是全局）：这里那个"今天 3/10 题"
+  // 是给当前单元那一行看的，把别的单元做的算进来，切个单元数字就变了。
+  // 老记录没有 unit 字段，那种照旧算进来 —— 宁可多算一条，也别把它藏掉。
+  function historyTodayByKind(unit) {
     var start = todayStart(), out = {};
     (app.state.history || []).forEach(function (h) {
       if ((h.ts || 0) < start) return;
+      if (unit && unit !== 'all' && h.unit && h.unit !== unit) return;
       var kind = String(h.kind || 'w');
       out[kind] = (out[kind] || 0) + 1;
     });
@@ -1214,7 +1336,7 @@
       '<span class="today-text"><b>' + esc(o.title) + '</b>' +
       (o.sub ? '<i>' + esc(o.sub) + '</i>' : '') + '</span>' +
       (o.done
-        ? '<span class="today-done">今天做过</span>'
+        ? '<span class="today-done">今天练过了</span>'
         : '<button class="btn btn-soft" data-act="' + o.act + '">' + esc(o.btn) + '</button>') +
       '</div>';
   }
@@ -1223,13 +1345,20 @@
     var st = app.state;
     var fb = st.feedback || [];
     var redoN = fb.filter(function (f) { return !f.isCorrect && isRedoable(f); }).length;
-    var due = dueItems();
     var pendingN = (st.pending || []).length;
     var unit = st.unit;
     var lesson = st.lesson || 'all';
+    // 到期和进度都只算**当前这个范围**（单元 + 课时）——
+    // 原来是跨全部单元数的，于是切到哪个单元首页都写着同一句"复习 120 条"，
+    // 那个数跟眼前这个单元根本没有关系。
+    var due = dueItems(unit, lesson);
+    var progress = dueProgress();            // 有正在进行的批次时才有值
+    var run0 = dueRun();
+    var staleDue = !!(run0 && run0.unit === unit &&
+      (run0.lesson || 'all') === lesson && dueRunExpired(run0));
 
     var byKind = practicedTodayByKind();
-    var histKind = historyTodayByKind();
+    var histKind = historyTodayByKind(unit);
     var todayN = Object.keys(byKind).reduce(function (s, k) { return s + byKind[k]; }, 0);
 
     var items = itemsForLesson(unit, lesson);
@@ -1257,43 +1386,82 @@
     // ② 复习：SRS 今天到期的。把前几个字词名直接摆出来 ——
     //    原来这张卡单独占一张（"今天该复习 N"），和清单里的入口重复，
     //    并到一起之后少一张卡，具体是哪些字也照样看得到。
-    if (due.length) {
+    //
+    //    有正在进行的批次时，这一行显示的是**这一批的进度**（已做 / 剩余），
+    //    而不是重新数一遍到期 —— 孩子要的是"我做到哪儿了"，不是"今天又有多少到期"。
+    if (progress) {
+      no++;
+      if (progress.left > 0) {
+        add({
+          no: no, title: '复习 ' + progress.total + ' 条',
+          sub: '已做 ' + progress.done + ' / 剩余 ' + progress.left +
+            ' · 还有 ' + fmtLeft(progress.until) + '，超时会重新打乱',
+          btn: progress.done ? '继续复习' : '开始复习', act: 'start-due'
+        });
+      } else {
+        add({
+          no: no, title: '复习 ' + progress.total + ' 条',
+          sub: '这一批已经做完了', btn: '', act: '', done: true
+        });
+      }
+    } else if (due.length) {
       no++;
       add({
         no: no, title: '复习 ' + due.length + ' 条',
-        sub: due.slice(0, 6).map(function (it) { return it.text; }).join('、') +
-          (due.length > 6 ? ' 等' : ''),
+        sub: (staleDue
+          ? '上一批没在 2 小时内做完，点进去会重新打乱、从头来'
+          : (due.slice(0, 6).map(function (it) { return it.text; }).join('、') +
+            (due.length > 6 ? ' 等' : ''))),
         btn: '就练这些', act: 'start-due'
       });
     }
-    // ③ 今天还没练的那几类。做过的显示"✓ 今天做过"，其余接着往下排。
+    // ③ 今天还没练的那几类。
+    //
+    // 这里的"做完了没有"**按当前这一摊算、按"一轮的量"算**：
+    // 原来判定的是全局统计（今天动过任何一条写字，这一行就亮），于是
+    // 写一个字、切到别的单元也照样写着"今天做过"，家长还以为练完了。
+    // 现在分母是本摊总量、门槛是一轮（10 条），达不到就把实际进度摆出来。
     if (items.length) {
       no++;
+      var pw = progressOfItems(items);
       add({
-        no: no, title: (st.mode === 'word2py' ? '写拼音 ' : '写字词 ') + items.length + ' 条',
-        sub: scopeTitle(), btn: '开始写', act: 'start',
-        done: !!(byKind.w || byKind.c)
+        no: no,
+        title: (st.mode === 'word2py' ? '写拼音 ' : '写字词 ') + items.length + ' 条',
+        sub: scopeTitle() + ' · ' + progressLine(pw),
+        btn: pw.today ? '继续写' : '开始写', act: 'start',
+        done: pw.ok
       });
     }
     if (zuciItems.length) {
       no++;
+      var pz = progressOfItems(zuciItems);
       add({
-        no: no, title: '组词 ' + zuciItems.length + ' 条', sub: '给字组词，一行一个',
-        btn: '开始练', act: 'start-zuci', done: !!byKind.z
+        no: no, title: '组词 ' + zuciItems.length + ' 条',
+        sub: '给字组词，一行一个 · ' + progressLine(pz),
+        btn: pz.today ? '继续练' : '开始练', act: 'start-zuci',
+        done: pz.ok
       });
     }
     if (polyN) {
       no++;
+      var polyToday = histKind.p || 0;
+      var polyGoal = Math.min(SESSION_SIZE, polyN);
       add({
-        no: no, title: '多音字选读音 ' + polyN + ' 题', sub: '当场判分，不用等家长批',
-        btn: '开始做', act: 'start-poly', done: !!histKind.p
+        no: no, title: '多音字选读音 ' + polyN + ' 题',
+        sub: '当场判分，不用等家长批 · 今天 ' + polyToday + '/' + polyGoal + ' 题',
+        btn: polyToday ? '继续做' : '开始做', act: 'start-poly',
+        done: polyToday >= polyGoal
       });
     }
     if (reciteN) {
       no++;
+      var rcToday = histKind.r || 0;
+      var rcGoal = Math.min(SESSION_SIZE, reciteN);
       add({
-        no: no, title: '默写 ' + reciteN + ' 句', sub: '日积月累 / 古诗，当场判分',
-        btn: '开始默写', act: 'start-recite', done: !!histKind.r
+        no: no, title: '默写 ' + reciteN + ' 句',
+        sub: '日积月累 / 古诗，当场判分 · 今天 ' + rcToday + '/' + rcGoal + ' 句',
+        btn: rcToday ? '继续默写' : '开始默写', act: 'start-recite',
+        done: rcToday >= rcGoal
       });
     }
 
@@ -1331,9 +1499,18 @@
     var polyCount = itemsForPoly(unit).length;
     var reciteCount = itemsForRecite(unit).length;
 
+    // 单元按钮上带**累计进度**：家长打开页面第一个想知道的就是
+    // "哪些单元练完了、哪些还没动" —— 原来这个信息哪儿都没有。
     var unitBtns = D.UNITS.map(function (u) {
+      var p = progressOfItems(itemsForLesson(u.id, 'all'));
+      var mark = '';
+      if (p.total) {
+        mark = p.done >= p.total
+          ? '<span class="when done">✓ 练完</span>'
+          : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
+      }
       return '<button class="unit-btn' + (unit === u.id ? ' on' : '') +
-        '" data-act="unit" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + '</button>';
+        '" data-act="unit" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + mark + '</button>';
     }).join('');
 
     var cur = D.byId(unit);
@@ -1349,15 +1526,15 @@
             return '<span class="lesson-off">' + esc(label) +
               '（' + (ln.star ? '略读课文，无字词' : '本课没有字词') + '）</span>';
           }
-          // 练过的那一课标上"最后一次是哪天"，**今天练过的直接标"今天做过"**：
-          // 孩子和家长都要能一眼看出"这一课今天动过没有"，不用去翻记录。
-          var at = lastAtOfItems(items);
+          // 每一课标"练到哪儿了"：全练完打勾，没练完报 8/12。
+          // 以前这里标的是"今天做过" —— 写一个字就亮，家长会以为这一课练完了。
+          var p = progressOfItems(items);
+          var mark = p.done >= p.total
+            ? '<span class="when done">✓</span>'
+            : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
           return '<button class="unit-btn' + (String(lesson) === String(ln.no) ? ' on' : '') +
             '" data-act="lesson" data-l="' + esc(ln.no) + '">' +
-            esc(label) + '（' + n + '）' +
-            (at >= todayStart()
-              ? '<span class="when done">今天做过</span>'
-              : (at ? '<span class="when">' + esc(fmtDayShort(at)) + '</span>' : '')) +
+            esc(label) + '（' + n + '）' + mark +
             '</button>';
         }).join('');
     }
@@ -1474,6 +1651,17 @@
         }).join('');
   }
 
+  // 复习轮里挂在题目上方的那一条：这一批的进度（已做 / 剩余 / 还剩多久）。
+  // 手写题和当堂判分的题（多音字 / 默写）都要有 —— 复习批次里两种题混着出，
+  // 只在一种题型上显示的话，孩子换一题就以为进度不见了。
+  function duePill() {
+    if (!app.dueMode) return '';
+    var dp = dueProgress();
+    if (!dp) return '';
+    return '<div class="card card-quiet due-pill">这一批复习：已做 ' + dp.done +
+      ' · 剩余 ' + dp.left + '　（' + esc(fmtLeft(dp.until)) + '内做完，超时会重新打乱）</div>';
+  }
+
   function typedShell(tag, stemLabel, stemBody, body, note) {
     return '' +
       '<div class="topbar">' +
@@ -1481,6 +1669,7 @@
       '<div class="dots">' + typedProgress() + '</div>' +
       '<span class="topbar-right">' + (app.cursor + 1) + '/' + app.session.length + '</span>' +
       '</div>' +
+      duePill() +
       '<div class="card card-q">' +
       '<div class="lesson-tag">' + esc(tag) + '</div>' +
       '<div class="stem"><span class="stem-label">' + esc(stemLabel) + '</span>' + stemBody + '</div>' +
@@ -1601,6 +1790,7 @@
       '<div class="dots">' + progress + '</div>' +
       '<span class="topbar-right">' + (app.cursor + 1) + '/' + total + '</span>' +
       '</div>' +
+      duePill() +
 
       '<div class="card card-q">' +
       '<div class="lesson-tag">' + esc(it.no ? (lessonLabel({ no: it.no }) + '《' + it.title + '》') : it.title) +
@@ -2420,6 +2610,7 @@
   /* ============================== 动作 ============================== */
   function startSession() {
     app.session = buildSession(app.state.unit, app.state.lesson);
+    app.dueMode = false;   // 不是复习轮：做的题不往复习批次里记账
     app.cursor = 0;
     app.strokes = [];
     app.message = '';
@@ -2439,6 +2630,7 @@
     }
     var rng = mulberry32((Date.now() ^ 0x9e3779b1) >>> 0);
     app.session = orderByDue(rng, all).slice(0, SESSION_SIZE);
+    app.dueMode = false;   // 不是复习轮
     app.cursor = 0;
     app.strokes = [];
     app.message = '';
@@ -2465,6 +2657,7 @@
     // 选项也得打乱。readings 的顺序是照教材抄的，正确的永远排在第一个 ——
     // 孩子练到第三题就发现"点最上面那个准没错"，这题等于没出。
     app.session.forEach(function (it) { it.options = shuffle(rng, it.options); });
+    app.dueMode = false;   // 不是复习轮
     app.cursor = 0;
     app.typed = '';
     app.roundOk = 0;
@@ -2484,6 +2677,7 @@
     }
     // 不打乱：背诵是有顺序的，第二句本来就该接在第一句后面
     app.session = all;
+    app.dueMode = false;   // 不是复习轮
     app.cursor = 0;
     app.typed = '';
     app.roundOk = 0;
@@ -2495,17 +2689,75 @@
     render();
   }
 
-  // 只练今天到期的那些（跨单元）。这一轮不掺新字 —— 复习就是复习。
+  // 只练今天到期的那些（当前范围）。这一轮不掺新字 —— 复习就是复习。
+  //
+  // 顺序**固定在一个批次里**：第一次点会开一批（打乱一次就定下来），
+  // 之后点进来是"接着上次做"，题目和顺序都不变；超过 2 小时才作废重来。
   function startDue() {
-    var list = dueItems();
-    if (!list.length) {
-      // 数据被别处改过（比如刚在另一台设备上批完）时走到这儿，别把孩子丢进空题目
-      app.message = '今天没有到期的，练点别的也一样。';
+    var unit = app.state.unit, lesson = app.state.lesson || 'all';
+    var run = dueRun();
+    var restartMsg = '';
+
+    // 换了范围 → 这一批不适用了，按新范围重新开一批
+    if (run && (run.unit !== unit || (run.lesson || 'all') !== lesson)) run = null;
+
+    // 过了时限 → 作废重来：**还是原来那一批**（全量重做），
+    // 只是顺序重新打乱、已做的清零。这里不再去数一遍"现在还有哪些到期"——
+    // 那样会变成"只补没做的"，跟"必须重做一次"这个约定不符。
+    if (run && dueRunExpired(run)) {
+      restartMsg = '上次没在 2 小时内做完，这一批重新打乱，从头来一遍。';
+      var rngR = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
+      run = {
+        unit: unit,
+        lesson: lesson,
+        ids: shuffle(rngR, run.ids.slice()),
+        done: [],
+        startedAt: Date.now()
+      };
+      app.state.dueRun = run;
+      saveState();
+    }
+
+    if (!run) {
+      var list = dueItems(unit, lesson);
+      if (!list.length) {
+        // 数据被别处改过（比如刚在另一台设备上批完）时走到这儿，别把孩子丢进空题目
+        app.message = '这个范围里没有到期的，练点别的也一样。';
+        return render();
+      }
+      var rng0 = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
+      var ordered = orderByDue(rng0, list);
+      run = {
+        unit: unit,
+        lesson: lesson,
+        ids: ordered.map(keyOf),   // 顺序在这一刻定下来，之后不再动
+        done: [],
+        startedAt: Date.now()
+      };
+      app.state.dueRun = run;
+      saveState();
+    }
+
+    // 按批次里的顺序取还没做的那些
+    var idx = {};
+    allItemsForScope(unit, lesson).forEach(function (it) { idx[keyOf(it)] = it; });
+    var left = run.ids
+      .filter(function (k) { return run.done.indexOf(k) < 0; })
+      .map(function (k) { return idx[k]; })
+      .filter(Boolean);
+
+    if (!left.length) {
+      // 这一批做完了：把批次收掉，别留一个"还剩 0 条"的壳挂在首页
+      app.state.dueRun = null;
+      saveState();
+      app.message = '这一批复习做完了。';
       return render();
     }
-    var rng = mulberry32((Date.now() ^ 0x27d4eb2f) >>> 0);
-    app.session = orderByDue(rng, list);
+
+    app.session = left;
+    app.dueMode = true;    // 记的过程中要往这一批里记账
     // 多音字的选项每轮换位置：正确读音永远排第一个的话，孩子练两题就开始点最上面那个
+    var rng = mulberry32((Date.now() ^ 0x9e3779b9) >>> 0);
     app.session.forEach(function (it) {
       if (it.options) it.options = shuffle(rng, it.options);
     });
@@ -2514,7 +2766,7 @@
     app.typed = '';
     app.roundOk = 0;
     app.roundTotal = 0;
-    app.message = '';
+    app.message = restartMsg;
     app.submitMsg = '';
     app.view = 'practice';
     saveDraft('typed');
@@ -2571,6 +2823,7 @@
     app.message = '';
     app.submitMsg = '';
     app.redo = true;
+    app.dueMode = false;   // 订正不是复习轮
     app.view = 'practice';
     saveDraft('write');
     render();
@@ -2763,6 +3016,9 @@
       },
       strokes: cleanStrokes(app.strokes)
     });
+    // 复习轮里写完一条就记一笔 —— 不等家长批：对孩子来说"我写完了"就是做完了，
+    // 而首页那句"已做 12 / 剩余 108"得当场动，不然他会以为白写。
+    markDueDone(it);
     saveState();
 
     app.strokes = [];
@@ -2823,6 +3079,9 @@
       r.note = note;
     }
     app.state.stats[k] = r;
+    // 当堂判分的题（多音字 / 默写）做完一条也算复习进度；
+    // 手写题在提交那一刻已经记过了，这里会去重（同一批次里只记一次）。
+    markDueDone(item);
 
     // 存下原始笔迹：报告里要能回放"当时写的是什么"，光看汉字和拼音
     // 想不起错在哪一笔。多音字 / 默写没有笔迹，strokes 为空就不存。

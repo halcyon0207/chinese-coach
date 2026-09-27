@@ -32,6 +32,11 @@
       // 没写完的那一轮：整份题目 + 做到第几题 + 当前题的笔迹。
       // 练习被打断是常态，下次进同一台设备要能接着写（见 app.js 的 saveDraft）。
       draft: null,
+      // 正在进行的"这一批复习"：题目（ids）和顺序固定，已做的记在 done 里，
+      // 2 小时内有效（见 app.js 的 DUE_WINDOW_MS）。
+      // 存本机而不是放内存：点进去做一半退出、来回切几次，顺序和进度都得还在 ——
+      // 原来每次点进去都重新打乱，孩子刚记住的"做到哪儿了"就没了。
+      dueRun: null,
       sync: null         // 跨设备同步（家庭码 / 设备标识），见 js/cloud.js；没开就是 null
     };
   }
@@ -42,6 +47,22 @@
   function obj(v, dflt) { return (v && typeof v === 'object' && !Array.isArray(v)) ? v : dflt; }
   function arr(v, dflt) { return Array.isArray(v) ? v : dflt; }
   function str(v, dflt) { return typeof v === 'string' && v ? v : dflt; }
+
+  // 复习批次的形状要能放心用：ids 必须是非空的字符串数组，done / startedAt 也要对。
+  // 形状不对就当没有这一批（宁可从新开始），否则孩子会被丢进一场空题目 ——
+  // ids 里全是别的东西时，app.js 按 key 找不到任何条目。
+  function normalizeDueRun(v) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    var ids = arr(v.ids, []).filter(function (k) { return typeof k === 'string' && k; });
+    if (!ids.length) return null;
+    return {
+      unit: typeof v.unit === 'string' ? v.unit : 'U1',
+      lesson: typeof v.lesson === 'string' && v.lesson ? v.lesson : 'all',
+      ids: ids,
+      done: arr(v.done, []).filter(function (k) { return typeof k === 'string' && k; }),
+      startedAt: (typeof v.startedAt === 'number' && isFinite(v.startedAt)) ? v.startedAt : 0
+    };
+  }
 
   function load() {
     loadFailed = false;
@@ -62,6 +83,7 @@
         feedback: arr(s.feedback, []),
         history: arr(s.history, []),
         draft: obj(s.draft, null),
+        dueRun: normalizeDueRun(s.dueRun),
         sync: obj(s.sync, { on: false, fam: '', dev: '', name: '', lastAt: 0 })
       };
     } catch (e) {
