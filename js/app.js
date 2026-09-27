@@ -1813,31 +1813,39 @@
    * 但家长实际的做法往往是：让孩子**在本子上用笔再写一遍**。那就要有一份
    * 拿着能用的清单 —— 这张卡就是它。
    *
+   * 收录规矩（家长定的）：**错过一次就收进来**，一直留着，
+   * 直到"在本子上抄完、点了记一笔"才销掉。
+   *
+   * 为什么不是"最近一次还是错的才留"（原来是这么写的）：家长的原话 ——
+   * "你把改对的移除错题本，就失去了错题本的意义了"。这份清单记的是
+   * "这个字我错过、要动手抄一遍"，不是"现在还错着"；在平板上练对一次就抹掉它，
+   * 等于把该抄的字悄悄漏掉。
+   *
    * 数据**不另记一份**：错题本要是自己记一套账，早晚和批改记录对不上。
-   * 直接从批改历史里现算，口径是"**这个字（词）最近一次的结果是错的**"——
-   * 在平板上把它练对一次，它就自动从清单里消失，不用回来打勾。
+   * 直接从批改历史里现算。
    *
    * 清单上**只显示拼音和题型，不显示字本身**：孩子要是照着字抄，
    * 那就不是订正了。看拼音写生字的那类字，提示词照给（和练习时一样）。
    */
   function mistakeItems() {
-    var latest = {}, wrongN = {};
+    var wrongN = {}, wrongAt = {};
     (app.state.history || []).forEach(function (h) {
       // history 里的 key 已经是 keyOf(item) = "kind:文字"，直接用它 ——
       // 别再拼一次前缀：那样拼出来是 "w:w:观潮"，和 stats 里的键对不上，
       // 以后想让错题本和掌握度联动就会踩坑。老记录没有 key 时按 kind + text 补。
       var k = h.key || ((h.kind || 'w') + ':' + (h.text || ''));
-      if (!latest[k] || (h.ts || 0) >= latest[k].ts) latest[k] = h;
-      if (!h.isCorrect) wrongN[k] = (wrongN[k] || 0) + 1;
+      if (h.isCorrect) return;              // 只有"错"才算数，对的记录不参与
+      wrongN[k] = (wrongN[k] || 0) + 1;
+      var ts = h.ts || 0;
+      if (!wrongAt[k] || ts > wrongAt[k].ts) wrongAt[k] = h;   // 留最后一次错的
     });
     var done = app.state.mistakeDone || {};
     var out = [];
-    Object.keys(latest).forEach(function (k) {
-      var h = latest[k];
+    Object.keys(wrongAt).forEach(function (k) {
+      var h = wrongAt[k];
       var ts = h.ts || 0;
-      if (h.isCorrect) return;              // 最近一次是对的 —— 已经订正过了
-      // 在本子上写完、按了「写完了」也算消掉；
-      // 但**之后要是又写错了**（错的时间晚于消掉的时间），它得重新冒出来 ——
+      // 在本子上写完、按了「写完了」才算销掉。
+      // 但**之后要是又写错了**（错的时间晚于销掉的时间），它得重新冒出来 ——
       // 不然孩子这次白错，家长还不知道。
       if ((done[k] || 0) >= ts) return;
       out.push({
@@ -1846,6 +1854,21 @@
       });
     });
     out.sort(function (a, b) { return b.ts - a.ts; });   // 最近错的排前面
+    return out;
+  }
+
+  // 今天写错过的字词（不管后来改没改对）。
+  //
+  // 用处：**当天不再把它们翻出来练**。家长的原话 ——
+  // "当天的练习题目不再循环练习错题（只在后续的复习中加入），
+  //  当天的错题我要让他在本子上手写（线下完成）"。
+  function wrongTodayKeys() {
+    var start = todayStart(), out = {};
+    (app.state.history || []).forEach(function (h) {
+      if ((h.ts || 0) < start || h.isCorrect) return;
+      var k = h.key || ((h.kind || 'w') + ':' + (h.text || ''));
+      if (k) out[k] = 1;
+    });
     return out;
   }
 
@@ -1898,10 +1921,11 @@
         ? '<p class="card-note">照着拼音，在本子上把每个字（词）写一行。' +
           '一份写完，点下面的按钮记一笔 —— 清单就清了，下次只剩新错的。' +
           '要是又写错了，它会自己回来，不用记着谁还没写。</p>' +
-          // 家长问过"怎么才 10 条，是不是限制了数量"——没有限制，
-          // 是这份清单的收录规矩本来就窄。写在这里，省得再猜。
-          '<p class="card-note">这份清单只收"现在还没改对的"：同一个字（词）只算一条；' +
-          '后来写对了、或者已经抄过一遍，就不再占地方 —— 所以条数比"孩子一共错过多少字"少。</p>' +
+          // 家长问过"怎么才 10 条"，也明确定过规矩："第一次错的就放错题本，
+          // 你把改对的移除错题本，就失去了错题本的意义了" —— 写在页面上，省得再猜。
+          '<p class="card-note">错过一次就收进来，同一个字（词）只算一条。' +
+          '在本子上把这一批抄完、点下面的按钮才会消掉 —— 在平板上又把它练对了一次不算，' +
+          '所以这里记的是"该动手抄的字"，不是"现在还错着的字"。</p>' +
           rows +
           '<button class="btn btn-primary btn-block" data-act="mistake-done-all">' +
           '这一批都写完了（' + list.length + '）</button>'
@@ -3136,6 +3160,11 @@
   // 不传（「开始写」/「再练一次」）就出全部，可以整摊重练一遍。
   function startSession(onlyLeft) {
     var list = itemsForLesson(selUnits(), app.state.lesson);
+    // 今天写错过的，当天不再出（见 wrongTodayKeys）—— 当天的错字在**本子上**
+    // 手写订正，线上再循环一遍没有意义，还把练习量凭空撑大。
+    // 它从第二天起进正常的复习排队（见 recordResult 里的 dueAt）。
+    var wrongToday = wrongTodayKeys();
+    list = list.filter(function (it) { return !wrongToday[keyOf(it)]; });
     if (onlyLeft) list = leftItems(list, app.state.mode || 'py2word');
     if (!list.length) {
       app.message = '这一摊已经练完了。想再走一遍就点「再练一次」。';
@@ -3644,10 +3673,13 @@
     } else {
       r.wrongs++;
       r.level = 0;
-      // 错了就当天到期（可以立刻订正），而不是等到明天。
-      // 错的字拖几天才改，孩子多半已经把错的写法记牢了 —— 错误先入为主，
-      // 纠正的成本比当时改高得多。
-      r.dueAt = Date.now();
+      // 错了**排到明天**，不再"立刻又到期"（家长定的规矩）：
+      // "当天的练习题目不再循环练习错题（只在后续的复习中加入），
+      //  当天的错题我要让他在本子上手写（线下完成）。"
+      // 当天再把它翻出来练一遍，等于抢了本子上那遍手写的位置；
+      // 从第二天起它照常进间隔复习，该多练几次还是多练几次。
+      //（"趁热订正"那一轮不受影响 —— 那是家长刚批完专门开的一轮。）
+      r.dueAt = dayAfter(1);
     }
     r.lastAt = at;   // "最后练过"是**孩子写的时候**，不是家长批的时候
     if (note) {
