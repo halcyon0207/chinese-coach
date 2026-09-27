@@ -1418,7 +1418,10 @@
         ? '<span class="today-done">' + esc(o.when || '今天练过了') + '</span>'
         : '<span class="today-side">' +
           (o.when ? '<i class="today-when">' + esc(o.when) + '</i>' : '') +
-          '<button class="btn btn-soft" data-act="' + o.act + '">' + esc(o.btn) + '</button>' +
+          // extra 用来带按钮自己的参数（比如"这一行点进去用什么方向练"）——
+          // 不带的话，两种方向就只能靠用户进去以后再切换。
+          '<button class="btn btn-soft" data-act="' + o.act + '"' + (o.extra || '') + '>' +
+          esc(o.btn) + '</button>' +
           '</span>') +
       '</div>';
   }
@@ -1514,15 +1517,25 @@
     // 都好像需要重新开始一样"，孩子看日期自己决定要不要再来一遍。
     var at;
     if (items.length) {
-      no++;
+      // 写字词 / 写拼音**分成两行**（原来按当前选的模式二选一显示）——
+      // 家长的原话："这两个在同一个地方，容易忽略掉其中某一个。"
+      // 两个方向确实练的不是同一件事：一个是"听到音写出字"，一个是"看到字写出音"。
+      // 进度两行共用同一批条目（同一个字练过就是练过，不必按方向分开记账），
+      // 按钮各自带着自己的方向进去，省得进去还要先切换模式。
       var pw = progressOfItems(items);
       at = lastDoneAt(items);
       add({
-        no: no,
-        title: (st.mode === 'word2py' ? '写拼音 ' : '写字词 ') + items.length + ' 条',
-        sub: scopeTitle() + ' · ' + progressLine(pw),
-        btn: at ? '再练一次' : '开始写', act: 'start', when: fmtDoneAt(at),
-        done: pw.ok
+        no: no, title: '写字词 ' + items.length + ' 条',
+        sub: '看拼音写词语 · ' + scopeTitle() + ' · ' + progressLine(pw),
+        btn: at ? '再练一次' : '开始写', act: 'start-mode',
+        extra: ' data-m="py2word"', when: fmtDoneAt(at), done: pw.ok
+      });
+      no++;
+      add({
+        no: no, title: '写拼音 ' + items.length + ' 条',
+        sub: '看词语写拼音 · ' + scopeTitle() + ' · ' + progressLine(pw),
+        btn: at ? '再练一次' : '开始写', act: 'start-mode',
+        extra: ' data-m="word2py"', when: fmtDoneAt(at), done: pw.ok
       });
     }
     if (zuciItems.length) {
@@ -1703,7 +1716,15 @@
     // 错字、学过的字词不该因为"这一单元学完了"就不再考 —— 复习本来就是跨单元的，
     // 考前更该这么练。点一下选中、再点一下取消（至少留一个，不然没题可出）。
     var selIds = selUnits();
-    var unitBtns = D.UNITS.map(function (u) {
+    // 「综合」= 一键全选：错字和学过的字词不该因为"这一单元学完了"就不再考，
+    // 复习本来就是跨单元的，考前更要混着练。
+    // 它是个**快捷方式**，不是另一种模式 —— 点了之后各单元按钮照样亮着、照样能单独取消，
+    // 所以"选了哪几个单元"始终看得见（原来那个开关式的"综合"做不到这一点）。
+    var allIds = D.UNITS.map(function (x) { return x.id; });
+    var allOn = selIds.length >= allIds.length;
+    var unitBtns = '<button class="unit-btn' + (allOn ? ' on' : '') +
+      '" data-act="unit-all">综合</button>' +
+      D.UNITS.map(function (u) {
       var on = selIds.indexOf(u.id) >= 0;
       var p = progressOfItems(itemsForLesson(u.id, 'all'));
       var mark = '';
@@ -3629,6 +3650,23 @@
 
     if (typeof t.blur === 'function') t.blur();
 
+    // 「综合」：一键全选所有单元（再点一下退回只留第一个）——
+    // 同一个按钮管"全选 / 取消"，不然点错了还得一个个去取消。
+    if (act === 'unit-all') {
+      var every = D.UNITS.map(function (x) { return x.id; });
+      app.state.units = (selUnits().length >= every.length) ? [every[0]] : every;
+      app.state.unit = app.state.units[0];
+      app.state.lesson = 'all';
+      saveState();
+      return render();
+    }
+    // 「今天要做的」里那两行各带一个方向：点"写拼音"就直接进写拼音，不用进去再切换。
+    if (act === 'start-mode') {
+      var m = t.getAttribute('data-m');
+      if (m === 'py2word' || m === 'word2py') app.state.mode = m;
+      saveState();
+      return startSession();
+    }
     // 单元**多选**（首页）：点一下选中、再点一下取消，至少留一个 ——
     // 一个都不选就没题可出了。
     if (act === 'unit-toggle') {
