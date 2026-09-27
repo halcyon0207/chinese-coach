@@ -273,10 +273,46 @@
     return u ? u.name.split('　')[0] : '';
   }
 
+  // 历史里只留最近这么多条的**笔迹**。
+  //
+  // 为什么：一条带笔迹的历史动不动十几 KB，而历史最多留 2000 条 ——
+  // 全带着笔迹能到十几 MB，可浏览器给的本地存储大约只有 5MB。
+  // 撑爆之后**什么都存不下**（连"孩子刚写的那一条"都存不了），接下来就会
+  // 每存一次失败一次，首页顶上挂出"这台设备现在存不下练习记录"。
+  // 笔迹只是"回看当时怎么写的"用的，报告里少一个回放能接受；
+  // 字、批注、统计、还没交的作业一条都不能丢。
+  var KEEP_INK = 60;
+
+  // 把"超出最近 keep 条"的历史笔迹摘掉。返回有没有真的摘掉东西。
+  function trimRecentInk(keep) {
+    var h = app.state.history || [];
+    var cut = h.length - keep;
+    if (cut <= 0) return false;
+    var changed = false;
+    for (var i = 0; i < cut; i++) {
+      if (h[i] && h[i].strokes) { delete h[i].strokes; changed = true; }
+    }
+    return changed;
+  }
+
+  // 空间告急时的抢救：历史笔迹砍到只剩最近几条，批改结果里的笔迹也砍掉。
+  // 先丢笔迹 —— 它最占地方，又最不关键。
+  function shedInk() {
+    var changed = trimRecentInk(8);
+    var fb = app.state.feedback || [];
+    for (var i = 0; i < fb.length; i++) {
+      if (fb[i] && fb[i].strokes) { delete fb[i].strokes; changed = true; }
+    }
+    return changed;
+  }
+
   // 保存必须看结果。隐私模式、空间满、被沙箱拦住时 setItem 会抛，
   // 只 console.warn 的表现就是"写了一晚上，下次打开全没了"，家长查都查不出来。
   function saveState() {
     if (S.save(app.state)) { app.storageWarn = ''; return true; }
+    // 存不下：先丢笔迹再试一次。这一步不能省 —— 不丢的话，孩子**接下来写的
+    // 每一条都存不住**（包括当前这条），而丢笔迹只是报告里看不了回放。
+    if (shedInk() && S.save(app.state)) { app.storageWarn = ''; return true; }
     app.storageWarn = '这台设备现在存不下练习记录（可能是无痕模式或空间已满）。' +
       '今天还能继续练，但关掉页面就不会保存，先告诉家长。';
     return false;
@@ -3643,6 +3679,12 @@
     if (app.state.history.length > 2000) {
       app.state.history = app.state.history.slice(-2000);
     }
+    // 只留最近 KEEP_INK 条的笔迹（见 saveState 上面的说明）。
+    // 这里用 O(1) 的办法：刚掉出窗口的那一条摘掉就够，不必每次全扫一遍。
+    var cutAt = app.state.history.length - 1 - KEEP_INK;
+    if (cutAt >= 0 && app.state.history[cutAt] && app.state.history[cutAt].strokes) {
+      delete app.state.history[cutAt].strokes;
+    }
   }
 
   // 家长要批的：本机写完的 + 别的设备传上来的，合成一条队，先写的先批。
@@ -4208,6 +4250,9 @@
 
   function init() {
     app.state = S.load();
+    // 老存档里可能攒了一大堆带笔迹的历史（那时候还没限量）——
+    // 一打开就先瘦一遍，不然第一次保存就可能撞上"存不下"。
+    trimRecentInk(KEEP_INK);
     // 读不出来 = 之前练的全没了。这必须说出来：静默回到空白状态，
     // 家长只会以为孩子自己清掉了。
     if (S.loadFailed && S.loadFailed()) {
