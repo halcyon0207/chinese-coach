@@ -1809,6 +1809,11 @@
       '</div>' +
       // 交的时机是"整轮写完"（那时会自动交），不是写一条交一条。
       // 这个按钮是给"我想早点让家长看到"用的：点一下把已经写好的**一起**交上去。
+      // 待传的那一批有多大 —— 这个数直接决定"能不能一趟发出去"，
+      // 而它恰恰是提交失败时最想知道、又最看不见的东西。摆在按钮旁边，不用猜。
+      (pendingSizeText()
+        ? '<p class="card-note">' + esc(pendingSizeText()) + '</p>'
+        : '') +
       '<div class="action-row">' +
       '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
       // 传到一半时这个按钮要变灰：再点一次不会有第二趟（flushWork 会挡住），
@@ -2859,6 +2864,25 @@
     return '再点一次试试；要是一直不行，让家长点开「跨设备同步」看看状态。';
   }
 
+  // 待传的这一批有多大。按 UTF-8 字节算（中文一个字 3 字节，按字符数会低估一半）——
+  // 上限那一头是死的：云函数请求体 256KB，所以这个数必须准。
+  function utf8Len(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      n += (c < 0x80) ? 1 : ((c < 0x800) ? 2 : 3);
+    }
+    return n;
+  }
+
+  function pendingSizeText() {
+    var n = (app.state.pending || []).length;
+    if (!n) return '';
+    var bytes = 0;
+    try { bytes = utf8Len(JSON.stringify(app.state.pending)); } catch (e) { return ''; }
+    return '待家长批改 ' + n + ' 条 · 约 ' + Math.round(bytes / 1024) + ' KB';
+  }
+
   function submitWork() {
     var n = (app.state.pending || []).length;
     if (!n) {
@@ -3568,22 +3592,32 @@
       app.cloudMsg = '正在测…';
       render();
       F.checkNetwork().then(function (r) {
-        var d = r.direct, p = r.post;
+        var d = r.direct, p = r.post, b = r.big;
         var line1 = d.ok
           ? ('① 直接连服务器：通（服务器回话 ' + d.status + '，' + d.ms + ' 毫秒）')
           : ('① 直接连服务器：不通（' + d.error + '）');
         var line2 = p.ok
-          ? ('② 提交用的那种请求：通（' + p.ms + ' 毫秒）')
-          : ('② 提交用的那种请求：连不上（' + p.error + '）');
-        // 三种组合对应三件完全不同的事，所以三句话分开说 —— 这是这一步的全部意义
-        var tail = p.ok
-          ? '两步都通 —— 这条路没问题。提交还是失败的话，多半是服务端正忙，隔一会儿再点一次。'
-          : (d.ok
-            ? '第一步通、第二步不通：说明是**这台设备的浏览器**把网页里发出的请求拦了' +
-              '（它的"安全防护 / 广告过滤"就是干这个的）。在它的网站设置里把防护关掉，' +
-              '或者换一个浏览器打开这个页面。'
-            : '两步都不通：这台设备到服务器的路整个不通，换个网络最快（手机开热点，平板连上再试）。');
-        app.cloudMsg = line1 + '　' + line2 + '　' + tail;
+          ? ('② 小请求（提交用的那种）：通（' + p.ms + ' 毫秒）')
+          : ('② 小请求（提交用的那种）：连不上（' + p.error + '）');
+        var line3 = b.ok
+          ? ('③ ' + b.kb + ' KB 的大请求：通（' + b.ms + ' 毫秒）')
+          : ('③ ' + b.kb + ' KB 的大请求：失败（' + b.error + '）');
+        // 三种断法对应三件完全不同的事，"能到哪一步"就是答案本身
+        var tail;
+        if (!p.ok) {
+          tail = d.ok
+            ? '第一步通、第二步不通：是这台设备的浏览器把网页里发出的请求拦了（安全防护 / 广告过滤）。' +
+              '在它的网站设置里关掉防护，或者换一个浏览器打开这个页面。'
+            : '两步都不通：这台设备到服务器的路整个不通，换个网络最快（手机开热点，平板连上再试）。';
+        } else if (!b.ok) {
+          tail = '小请求过得去、大请求过不去：问题在"一趟背的数据太多"，不是没网、也不是被拦。' +
+            '把每次传的批次切小就能绕过去（我改一下就行）——在改好之前，' +
+            '可以先在平板上把这一轮写完，让家长直接在这台设备上批。';
+        } else {
+          tail = '三步都通 —— 这条路没问题。那提交失败就另有原因了（多半是服务端处理这批具体数据时出了岔），' +
+            '我去查云函数的请求日志。';
+        }
+        app.cloudMsg = [line1, line2, line3, tail].join('　');
         render();
       });
       return;

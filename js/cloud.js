@@ -338,7 +338,15 @@
     });
   }
 
-  // 「测一下网络」：分两步问，因为这两步的结果**可以不一样** —— 而不一样的时候，
+  // 自检第三步的体量：和一批作业相当（BATCH_MAX_BYTES 150KB，这里取 120KB）。
+  // 用名字常量而不是就地写个数字，是因为这个数必须和"提交时一批能装多少"对得上 ——
+  // 对不上就会测出一个"通"，而真实提交照样失败，等于白测。
+  var BIG_KB = 120;
+  function BIG_PAD() {
+    return new Array(BIG_KB * 1024 + 1).join('x');
+  }
+
+  // 「测一下网络」：分三步问，因为这几步的结果**可以不一样** —— 而不一样的时候，
   // 恰好就是最难解释的那种现象。
   //
   //   ① 直接连服务器（GET）：你在浏览器地址栏里打开那个网址，走的就是这一类。
@@ -365,6 +373,23 @@
           lastError = friendly(e);
           if (hooks.onStatus) hooks.onStatus();
           return { direct: direct, post: { ok: false, ms: nowTs() - t2, error: friendly(e) } };
+        });
+      })
+      .then(function (r) {
+        // ③ 再按**真实提交的体量**发一趟（约 120 KB，和一批作业相当）。
+        // 前两步都很小，它们通只说明"这条路上能走人"；而真正要背的是几十上百 KB 的笔迹。
+        // 大请求卡在中间某一层（路由器、浏览器、运营商）时，表现和小请求被拦一模一样 ——
+        // 都是"拿不到响应"。只有按真实体量量一次，才能把这两件事分开。
+        // 载荷塞在 hello 里：云函数读得动、但它不认识这个字段，也不写任何数据。
+        var t3 = nowTs();
+        var payload = { action: 'hello', fam: s.fam, dev: s.dev, pad: BIG_PAD() };
+        return post(payload).then(function () {
+          return { direct: r.direct, post: r.post, big: { ok: true, ms: nowTs() - t3, kb: BIG_KB } };
+        }, function (e) {
+          return {
+            direct: r.direct, post: r.post,
+            big: { ok: false, ms: nowTs() - t3, kb: BIG_KB, error: friendly(e) }
+          };
         });
       });
   }
