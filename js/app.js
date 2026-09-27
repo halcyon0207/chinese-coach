@@ -2629,7 +2629,35 @@
 
   function inRange(h, since) { return ((h && h.ts) || 0) >= since; }
 
-  // 打开页面 / 从后台切回时取一次"家长在别处批的结果"。
+  /* ---- 批改结果要自动去取，作业上传仍然手动 ----
+   *
+   * 这两件事方向相反，所以处理方式也该相反：
+   *   · 作业上传是"孩子交东西" —— 什么时候交由他定，纯手动（见 submitWork）；
+   *   · 批改结果是"家长给他送东西" —— 他没法知道什么时候到，只能自己去取。
+   *
+   * 原来取批改的时机只有四个：打开页面 / 从后台切回 / 进"查看批改" / 进报告页。
+   * 可孩子交完作业就停在首页等着，他想不到"切到后台再切回来"这一招 ——
+   * 家长在手机上批完了，他这头一点动静都没有（实测就是这个反馈）。
+   *
+   * 所以补两层，代价都压到最小：
+   *   1. **每 3 分钟取一次**，而且只在页面**可见**时取（切后台就跳过）；
+   *      一次请求几 KB，绝大多数时候返回空，没有新东西时界面上完全无感。
+   *   2. **每次回首页时取一次** —— 孩子练完一轮回来，家长很可能已经批好上一轮了，
+   *      而首页那张「今天要做的」里的第一条就是"订正 N 条"。
+   */
+  var GRADE_POLL_MS = 3 * 60 * 1000;
+  var gradeTimer = null;
+  function startGradePoll() {
+    if (gradeTimer || typeof setInterval !== 'function') return;
+    gradeTimer = setInterval(function () {
+      // 页面在后台就别取：那不是"他现在需要看见"的东西，白跑一趟还费电
+      if (typeof document !== 'undefined' && document.visibilityState &&
+        document.visibilityState !== 'visible') return;
+      refreshGrades();
+    }, GRADE_POLL_MS);
+  }
+
+  // 打开页面 / 从后台切回 / 每 3 分钟 / 回首页时，取一次"家长在别处批的结果"。
   function refreshGrades() {
     if (!F || !F.on()) return;
     // 先把要送的回执取走，**不能等回调里再清**：这次请求回来的路上，
@@ -3532,6 +3560,9 @@
       // 回首页就翻篇。不清的话它会在页面顶上一直挂到下次联网，白占一块地方。
       app.cloudMsg = '';
       app.message = '';
+      // 顺手取一次批改结果：孩子练完一轮回来看，家长很可能已经批好上一轮了，
+      // 而首页那张「今天要做的」里第一条就是"订正 N 条"—— 该显示的时候得是真数。
+      refreshGrades();
       return render();
     }
     if (act === 'quit') {
@@ -3793,7 +3824,7 @@
 
     // 从后台切回前台时取一次结果；切走时把攒下的批改结果发出去。
     // **作业不自动上传** —— 那是纯手动的（见 submitWork）：什么时候传、什么时候批，
-    // 由人自己挑时间。不做定时器，也不轮询。
+    // 由人自己挑时间。
     if (typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible') {
@@ -3808,6 +3839,7 @@
         if (F && F.on()) F.flushGrades();
       });
     }
+    startGradePoll();
 
     render();
     refreshGrades();
