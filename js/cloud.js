@@ -256,9 +256,14 @@
   // 文件越大一个来回越慢。62 条作业按 10 条一批就是 7 个来回（实测半分钟往上），
   // 而这 7 个来回期间界面上只有一句"正在提交…" —— 看着像卡死了，其实一直在传，
   // 家长在那头刷新看到的自然也只有"先到的那一部分"（提交根本还没结束）。
-  // 所以一个请求能装多少就装多少：云函数请求体上限 256KB，这里留足余量。
+  //
+  // 但"一个请求能装多少就装多少"这一条走过头了：**这条路上限不在我们手里**。
+  // 实测（孩子那台平板，2026-09-27）：同一个页面里，5KB 的请求 253 毫秒就回来，
+  // 120KB 的直接连不上 —— 43 条作业（539KB）就是卡在这儿，一次都没上去过。
+  // 所以起始批次压到 40KB（不是 150KB），再留一手：发不出去就对半拆（见 flushWork），
+  // 最差拆到一条（10KB 上下），没有哪条路会拦它。
   var BATCH_MAX_ITEMS = 60;          // 只是兜底：真正在切的是字节数
-  var BATCH_MAX_BYTES = 150 * 1024;
+  var BATCH_MAX_BYTES = 40 * 1024;
 
   // 请求体的大小要按 UTF-8 **字节**算，不是字符数：JSON 里的中文一个字占 3 字节，
   // 按字符数估会低估（一条作业里题目、单元名都是中文），真超了 256KB
@@ -443,25 +448,56 @@
     var grades = [];
     var full = 0;   // 云端装不下、还留在本机的条数
     var sent = 0;
-    var chain = Promise.resolve();
-    batches.forEach(function (batch, i) {
-      chain = chain.then(function () {
-        var body = { action: 'work.push', fam: s.fam, dev: s.dev, items: batch };
-        // 第一批不带 append（整份覆盖），后面几批往上垒；
-        // 接着上次没传完的那批也必须带 append —— 否则会把已经上去的那部分冲掉。
-        if (i > 0 || resume) body.append = true;
-        return postOnce(body).then(function (data) {
-          // 搭车带回来的批改结果：孩子端不用再单独发一次请求
-          if (data && data.grades && data.grades.length) grades = grades.concat(data.grades);
-          // 云端说"装不下了"的条数。每批各报各的，要累加 ——
-          // 空间是逐批消耗掉的，后面的批可能整批都塞不进去。
-          if (data && typeof data.full === 'number') full += data.full;
-          batch.forEach(function (it) { doneIds.push(it.id); });
-          sent += batch.length;
-          if (typeof onProgress === 'function') {
-            onProgress({ batch: i + 1, batches: batches.length, sent: sent, total: todo.length });
-          }
+    var batchNo = 0;
+    // 只要还没成功写过一批，这一批就该用"整份覆盖"的语义（清掉云端上一轮的待批）；
+    // 接着上次没传完的必须一直往上垒，否则会把已经上去的那部分冲掉。
+    var firstDone = resume;
+
+    // 发一批；发不出去就对半拆开接着发。
+    //
+    // 为什么不干脆把批次调到一个"安全的数"：这条路的胃口**不在我们手里** ——
+    // 同一个页面里，小请求 253 毫秒就通，120KB 直接连不上（孩子那台平板实测）。
+    // 而"这批太大"和"网络断了"在浏览器里长得一模一样（都是拿不到响应），
+    // 从错误里根本分不出来。所以别猜那个数：大过不去就拆一半，还过不去再拆，
+    // 最差拆到一条 —— 一条十 KB 上下，没有哪条路会拦它。
+    // 代价是多跑几趟，但比"永远传不上去"强得多，而且不猜就不会猜错。
+    function sendBatch(items, append) {
+      var body = { action: 'work.push', fam: s.fam, dev: s.dev, items: items };
+      if (append) body.append = true;
+      return postOnce(body).then(function (data) {
+        // 只有**真正发成功的那一层**记账。拆开重试时，账由成功的那两层各记各的；
+        // 记在拆分的上一层会把同一批算两遍，界面上的进度就成了假的。
+        // 搭车带回来的批改结果同样只在成功那一层收 ✓
+        if (data && data.grades && data.grades.length) grades = grades.concat(data.grades);
+        // 云端说"装不下了"的条数。每批各报各的，要累加 ——
+        // 空间是逐批消耗掉的，后面的批可能整批都塞不进去。
+        if (data && typeof data.full === 'number') full += data.full;
+        items.forEach(function (it) { doneIds.push(it.id); });
+        sent += items.length;
+        batchNo++;
+        if (typeof onProgress === 'function') {
+          onProgress({
+            batch: batchNo,
+            batches: Math.max(batches.length, batchNo),   // 拆出来的趟数也要算进去
+            sent: sent, total: todo.length
+          });
+        }
+      }, function (e) {
+        if (items.length <= 1) throw e;   // 一条都过不去：那不是体积的事，是真失败了
+        var half = Math.ceil(items.length / 2);
+        // 左半继续扛"覆盖"的角色（如果正轮到它），右半一定往上垒
+        return sendBatch(items.slice(0, half), append).then(function () {
+          return sendBatch(items.slice(half), true);
         });
+      });
+    }
+
+    var chain = Promise.resolve();
+    batches.forEach(function (batch) {
+      chain = chain.then(function () {
+        var useAppend = firstDone;
+        firstDone = true;   // 从这一批起（哪怕它会被拆），后面都往上垒
+        return sendBatch(batch, useAppend);
       });
     });
 
