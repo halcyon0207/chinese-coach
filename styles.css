@@ -300,6 +300,24 @@ html, body {
 .mk-hint { display: block; font-style: normal; font-size: 14px; color: var(--muted); margin-top: 2px; }
 .mk-sub { display: block; font-style: normal; font-size: 12px; color: var(--muted); margin-top: 3px; }
 
+/* 错题本按题型分组：每组一个小标题，一类抄完再换下一类 */
+.mk-group-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 4px 0 2px;
+}
+.mk-group + .mk-group .mk-group-title {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+/* 组词那一条摆的是**字本身**（不是拼音），字号按字给 */
+.mk-py.mk-char {
+  font-size: 24px;
+  letter-spacing: 4px;
+}
+
 /* 看拼音写生字时的提示词：拼音下面一行小字。
    它只帮孩子确定"是哪个字"，不透露半个字形 —— 所以做得低调些，
    让注意力仍然落在拼音上，别一上来就被词带着走。 */

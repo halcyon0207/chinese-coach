@@ -1892,17 +1892,47 @@
   // 而孩子真正的活是拿笔写。
   function viewMistakes() {
     var list = mistakeItems();
-    var rows = list.map(function (m, i) {
-      var sub = (KIND_NAME[m.kind] || m.kind) + ' · 错 ' + m.wrongN + ' 次 · ' + esc(fmtDay(m.ts));
-      var tip = '';
-      if (m.kind === 'c') {
-        var w = hintWordOf(m.text, null);
-        if (w) tip = '<i class="mk-hint">' + esc(hintText(w, m.text)) + '</i>';
-      }
-      return '<div class="mk-item">' +
-        '<span class="mk-no">' + (i + 1) + '</span>' +
-        '<div class="mk-main"><b class="mk-py">' + esc(m.py) + '</b>' + tip +
-        '<i class="mk-sub">' + sub + '</i></div>' +
+
+    // 按题型归纳（家长要的："每种题型的错题放在一起"）——
+    // 混成一份的话，孩子得在"写词语 / 写生字 / 组词 / 默写"之间来回换脑子；
+    // 分开就一类一类抄完。组的顺序固定（见 MISTAKE_ORDER），别让它在两次打开之间跳。
+    var groups = [], at = {};
+    list.forEach(function (m) {
+      var k = m.kind || 'w';
+      if (!at[k]) { at[k] = { kind: k, items: [] }; groups.push(at[k]); }
+      at[k].items.push(m);
+    });
+    groups.sort(function (a, b) {
+      return MISTAKE_ORDER.indexOf(a.kind) - MISTAKE_ORDER.indexOf(b.kind);
+    });
+
+    var rows = groups.map(function (g) {
+      var head = (KIND_NAME[g.kind] || g.kind) + '（' + g.items.length + '）';
+      return '<div class="mk-group">' +
+        '<div class="mk-group-title">' + esc(head) + '</div>' +
+        g.items.map(function (m, i) {
+          var sub = (KIND_NAME[m.kind] || m.kind) + ' · 错 ' + m.wrongN + ' 次 · ' +
+            esc(fmtDay(m.ts));
+          var tip = '';
+          if (m.kind === 'c') {
+            var w = hintWordOf(m.text, null);
+            if (w) tip = '<i class="mk-hint">' + esc(hintText(w, m.text)) + '</i>';
+          }
+          // 主行摆什么看题型：
+          //   组词 —— 摆**字本身**，不摆拼音。这道题就是"看着这个字想词"，
+          //     摆个 ài 上去，孩子根本不知道该给哪个字组词
+          //    （家长的原话："组词的应该显示的是一个字吧，不应该是拼音"）。
+          //   其余 —— 摆拼音（摆出字来就不是写字练习了，见文件头的说明）；
+          //     默写这种本来就没有拼音的，退回摆它要写的内容，别留个空行。
+          var isZ = (m.kind === 'z');
+          var main = isZ ? (m.text || '') : (m.py || m.text || '');
+          return '<div class="mk-item">' +
+            '<span class="mk-no">' + (i + 1) + '</span>' +
+            '<div class="mk-main"><b class="mk-py' + (isZ ? ' mk-char' : '') + '">' +
+            esc(main) + '</b>' + tip +
+            '<i class="mk-sub">' + sub + '</i></div>' +
+            '</div>';
+        }).join('') +
         '</div>';
     }).join('');
 
@@ -2691,6 +2721,10 @@
   var KIND_NAME = {
     w: '看拼音写词语', c: '看拼音写生字', z: '组词', p: '多音字选读音', r: '默写'
   };
+
+  // 错题本按题型分组时的固定顺序：从"练得最多"到"最少"，孩子抄起来顺。
+  // 固定下来是为了**两次打开之间不跳**——顺序一变，他会以为清单换了一批。
+  var MISTAKE_ORDER = ['w', 'c', 'z', 'p', 'r'];
 
   // 跨设备同步的开关（只在家长报告页里，孩子碰不到）
   function syncCardHtml() {
