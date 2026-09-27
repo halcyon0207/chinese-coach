@@ -1556,17 +1556,19 @@
       '<span class="today-mark">' + (o.done ? '✓' : o.no) + '</span>' +
       '<span class="today-text"><b>' + esc(o.title) + '</b>' +
       (o.sub ? '<i>' + esc(o.sub) + '</i>' : '') + '</span>' +
-      (o.done
-        // 做完了不写"今天练过了"这种一律的话，写**具体哪会儿练的** ——
-        // 孩子看一眼就知道要不要再来一遍，不用猜。
-        ? '<span class="today-done">' + esc(o.when || '今天练过了') + '</span>'
-        : '<span class="today-side">' +
-          (o.when ? '<i class="today-when">' + esc(o.when) + '</i>' : '') +
-          // extra 用来带按钮自己的参数（比如"这一行点进去用什么方向练"）——
-          // 不带的话，两种方向就只能靠用户进去以后再切换。
-          '<button class="btn btn-soft" data-act="' + o.act + '"' + (o.extra || '') + '>' +
-          esc(o.btn) + '</button>' +
-          '</span>') +
+      '<span class="today-side">' +
+      // 时刻写**具体哪会儿练的**，不写"今天练过了"这种一律的话 ——
+      // 孩子看一眼就知道要不要再来一遍，不用猜。
+      (o.when ? '<i class="today-when">' + esc(o.when) + '</i>' : '') +
+      // **做完了的这一行也要有按钮**：练满之后想再走一遍，得点得到「再练一次」。
+      // 原来 done 只摆一句"练过了"，那一摊就再也没有入口了 ——
+      // 而 v0.8.14 起"练满"的行会越来越多（完成标准改成练满整摊了）。
+      // extra 用来带按钮自己的参数（比如"这一行点进去用什么方向练"）。
+      (o.btn
+        ? '<button class="btn ' + (o.done ? 'btn-ghost' : 'btn-soft') + '" data-act="' + o.act +
+          '"' + (o.extra || '') + '>' + esc(o.btn) + '</button>'
+        : '') +
+      '</span>' +
       '</div>';
   }
 
