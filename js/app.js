@@ -135,6 +135,43 @@
     return out;
   }
 
+  // 这一摊最近一次练过是什么时候（含"写完还在等家长批的"）。
+  //
+  // 首页每一行都挂它。家长的原话是："不要有那种每天打开都好像需要重新开始一样，
+  // 孩子可以根据日期标签自己主动判断是否想要重新练一次。"
+  // 所以这里要的是一个**时刻**，不是"今天做过没有"这个布尔值 ——
+  // 布尔值到了第二天就什么都不剩了。
+  function lastDoneAt(items) {
+    var st = app.state.stats || {};
+    var pend = pendingTodayKeys();
+    var latest = 0;
+    (items || []).forEach(function (it) {
+      var k = keyOf(it);
+      var r = st[k];
+      if (r && (r.lastAt || 0) > latest) latest = r.lastAt;
+      if (pend[k]) {
+        var now = Date.now();
+        if (now > latest) latest = now;
+      }
+    });
+    return latest;
+  }
+
+  // 日期标签怎么写：
+  //   今天 → "今天 14:30 练过"（时刻有用：一天可能练了两轮）
+  //   昨天 → "昨天练过"
+  //   更早 → "9月25日 练过"
+  function fmtDoneAt(ts) {
+    if (!ts) return '';
+    var d = new Date(ts);
+    var start = todayStart();
+    if (ts >= start) {
+      return '今天 ' + d.getHours() + ':' + ('0' + d.getMinutes()).slice(-2) + ' 练过';
+    }
+    if (ts >= start - 24 * 3600 * 1000) return '昨天练过';
+    return fmtDay(ts) + ' 练过';
+  }
+
   // 这一摊（一个单元 / 一课 / 一类题）练到什么程度了。
   //
   // done   —— 累计练过多少条（有记录就算，不管哪天）
@@ -1069,103 +1106,16 @@
    * 课次一律按 js/data.js 认，教案只补课次以外的字段。
    */
 
-  // 进度表里的日期没写年份（"9.1-9.4"），按"9 月开学"补：
-  // 9—12 月算学期起始年，1 月算下一年。
-  function weekRange(dateStr, startYear) {
-    var m = /^(\d{1,2})\.(\d{1,2})\s*[-—~]\s*(\d{1,2})\.(\d{1,2})$/.exec(dateStr || '');
-    if (!m) return null;
-    var am = +m[1], ad = +m[2], bm = +m[3], bd = +m[4];
-    return {
-      from: new Date(am >= 9 ? startYear : startYear + 1, am - 1, ad),
-      to: new Date(bm >= 9 ? startYear : startYear + 1, bm - 1, bd, 23, 59, 59)
-    };
-  }
+  // （"本周课堂"那张卡连同它用的一整套进度表解析一起删掉了，见上面那段说明。
+  //   删掉的是 weekRange / currentWeek / weekItems / weekPlan —— 它们只服务于那张卡，
+  //   留着就是死代码，而首页的位置该留给"今天要做的"。）
 
-  function currentWeek(today) {
-    if (!J || !J.weeks || !J.weeks.length) return null;
-    today = today || new Date();
-    var sy = today.getMonth() + 1 >= 9 ? today.getFullYear() : today.getFullYear() - 1;
-    var hit = null, next = null;
-    J.weeks.forEach(function (w) {
-      var r = weekRange(w.date, sy);
-      if (!r) return;
-      if (today >= r.from && today <= r.to) hit = { w: w, range: r, now: true };
-      else if (!next && r.from > today) next = { w: w, range: r, now: false };
-    });
-    // 假期里（今天不在任何一周内）就给下一周，让家长提前知道开学要上什么
-    return hit || next || null;
-  }
 
-  // "1.观潮（3）2.繁星（2）" → [{name:'观潮',periods:3},{name:'繁星',periods:2}]
-  function weekItems(w) {
-    var text = (w.content || []).join('');
-    var out = [];
-    var re = /([^（(]+)[（(](\d+)[）)]/g;
-    var m;
-    while ((m = re.exec(text))) {
-      // "6.方帽子店" / "7*田忌赛马" / "3*现代诗二首" —— 前面的课次和星号都要去掉，
-      // 漏了点号的话会留下 ".方帽子店"，就匹配不上第 6 课了
-      var name = m[1].trim().replace(/^\d+\s*[.．、]?\s*[*＊]?\s*/, '');
-      if (name) out.push({ name: name, periods: +m[2] });
-    }
-    return out;
-  }
-
-  // 进度表只写"1.观潮"，没写第几单元。课表是顺着上的，
-  // 所以从第 1 周往后扫，单元指针只往前走、不回头 —— 这样第八单元的《古诗三首》
-  // 不会被认成第三单元那一个。
-  var weekPlanCache = null;
-  function weekPlan() {
-    if (weekPlanCache || !J) return weekPlanCache;
-    weekPlanCache = [];
-    var ptr = 0;
-    J.weeks.forEach(function (w) {
-      var items = weekItems(w).map(function (it) {
-        var found = null;
-        for (var i = ptr; i < D.UNITS.length && !found; i++) {
-          for (var k = 0; k < D.UNITS[i].lessons.length; k++) {
-            var t = D.UNITS[i].lessons[k].title || '';
-            if (t.indexOf(it.name) === 0 || it.name.indexOf(t) === 0) {
-              found = { unit: D.UNITS[i].id, no: D.UNITS[i].lessons[k].no, idx: i };
-              break;
-            }
-          }
-        }
-        if (found) ptr = found.idx;
-        return { name: it.name, periods: it.periods,
-                 unit: found ? found.unit : '', no: found ? found.no : 0 };
-      });
-      weekPlanCache.push({ w: w.w, date: w.date, note: w.note, items: items });
-    });
-    return weekPlanCache;
-  }
-
-  function progressCard() {
-    var plan = weekPlan();
-    var cw = currentWeek();
-    if (!plan || !cw) return '';
-    var row = null;
-    plan.forEach(function (p) { if (p.w === cw.w.w) row = p; });
-    if (!row || !row.items.length) return '';
-
-    var btns = row.items.map(function (it) {
-      if (!it.unit) {
-        return '<span class="lesson-off">' + esc(it.name) + '（' + it.periods + ' 节）</span>';
-      }
-      return '<button class="unit-btn" data-act="goto-lesson" data-u="' + esc(it.unit) +
-        '" data-l="' + esc(it.no) + '">' + esc(it.name) +
-        '（' + it.periods + ' 节）</button>';
-    }).join('');
-
-    return '<div class="card card-cta">' +
-      '<h2 class="card-title">' + (cw.now ? '本周课堂' : '下一周课堂') +
-      '　第 ' + row.w + ' 周 ' + esc(row.date) + '</h2>' +
-      '<p class="card-note">' + (cw.now
-        ? '学校这周讲到这儿。点一下就跳到那一课，练的字和课堂对得上。'
-        : '现在是假期，先看看开学第一周要上什么。') + '</p>' +
-      '<div class="unit-row">' + btns + '</div>' +
-      '</div>';
-  }
+  // 「本周课堂」那张卡已经删掉（家长的原话："没有实际意义"）。
+  // 它回答的是"学校这周讲到哪儿"，而首页真正要回答的是"今天先干哪个" ——
+  // 教案的进度表又常常滞后（假期里更是只能显示"下一周上什么"），
+  // 摆在首页第二屏只会挤掉有用的东西。教案数据本身留着：
+  // 「资料」页里的本课重点、写字指导都还在用它。
 
   // 某一课在教案里的全部课时（一课往往占 2～3 节，要点分散在各节里）
   function jiaoanLessons(unitId, no) {
@@ -1438,8 +1388,13 @@
       '<span class="today-text"><b>' + esc(o.title) + '</b>' +
       (o.sub ? '<i>' + esc(o.sub) + '</i>' : '') + '</span>' +
       (o.done
-        ? '<span class="today-done">今天练过了</span>'
-        : '<button class="btn btn-soft" data-act="' + o.act + '">' + esc(o.btn) + '</button>') +
+        // 做完了不写"今天练过了"这种一律的话，写**具体哪会儿练的** ——
+        // 孩子看一眼就知道要不要再来一遍，不用猜。
+        ? '<span class="today-done">' + esc(o.when || '今天练过了') + '</span>'
+        : '<span class="today-side">' +
+          (o.when ? '<i class="today-when">' + esc(o.when) + '</i>' : '') +
+          '<button class="btn btn-soft" data-act="' + o.act + '">' + esc(o.btn) + '</button>' +
+          '</span>') +
       '</div>';
   }
 
@@ -1509,12 +1464,14 @@
       }
     } else if (due.length) {
       no++;
+      // 这里**不把到期的字词列出来**：那些字就是接下来要写的答案，
+      // 提前摆在首页上，孩子扫一眼记住位置，写的时候就不用回忆了。
+      // （原来图省事把前六个摆上来，等于给答案。）
       add({
         no: no, title: '复习 ' + due.length + ' 条',
-        sub: (staleDue
+        sub: staleDue
           ? '上一批没在 2 小时内做完，点进去会重新打乱、从头来'
-          : (due.slice(0, 6).map(function (it) { return it.text; }).join('、') +
-            (due.length > 6 ? ' 等' : ''))),
+          : '今天到期的字词 · 点一下就练这一批',
         btn: '就练这些', act: 'start-due'
       });
     }
@@ -1524,24 +1481,31 @@
     // 原来判定的是全局统计（今天动过任何一条写字，这一行就亮），于是
     // 写一个字、切到别的单元也照样写着"今天做过"，家长还以为练完了。
     // 现在分母是本摊总量、门槛是一轮（10 条），达不到就把实际进度摆出来。
+    //
+    // 每一行都带上"最近一次是什么时候练的"：做完了报时刻（今天 14:30 练过），
+    // 没做完但练过的按钮写"再练一次" —— 家长的原话是"不要有那种每天打开
+    // 都好像需要重新开始一样"，孩子看日期自己决定要不要再来一遍。
+    var at;
     if (items.length) {
       no++;
       var pw = progressOfItems(items);
+      at = lastDoneAt(items);
       add({
         no: no,
         title: (st.mode === 'word2py' ? '写拼音 ' : '写字词 ') + items.length + ' 条',
         sub: scopeTitle() + ' · ' + progressLine(pw),
-        btn: pw.today ? '继续写' : '开始写', act: 'start',
+        btn: at ? '再练一次' : '开始写', act: 'start', when: fmtDoneAt(at),
         done: pw.ok
       });
     }
     if (zuciItems.length) {
       no++;
       var pz = progressOfItems(zuciItems);
+      at = lastDoneAt(zuciItems);
       add({
         no: no, title: '组词 ' + zuciItems.length + ' 条',
         sub: '给字组词，一行一个 · ' + progressLine(pz),
-        btn: pz.today ? '继续练' : '开始练', act: 'start-zuci',
+        btn: at ? '再练一次' : '开始练', act: 'start-zuci', when: fmtDoneAt(at),
         done: pz.ok
       });
     }
@@ -1550,20 +1514,22 @@
     if (polyN) {
       no++;
       var pp = progressOfItems(polyItems);
+      at = lastDoneAt(polyItems);
       add({
         no: no, title: '多音字选读音 ' + polyN + ' 题',
         sub: '当场判分，不用等家长批 · ' + progressLine(pp),
-        btn: pp.today ? '继续做' : '开始做', act: 'start-poly',
+        btn: at ? '再练一次' : '开始做', act: 'start-poly', when: fmtDoneAt(at),
         done: pp.ok
       });
     }
     if (reciteN) {
       no++;
       var pr = progressOfItems(reciteItems);
+      at = lastDoneAt(reciteItems);
       add({
         no: no, title: '默写 ' + reciteN + ' 句',
         sub: '日积月累 / 古诗，当场判分 · ' + progressLine(pr),
-        btn: pr.today ? '继续默写' : '开始默写', act: 'start-recite',
+        btn: at ? '再默一次' : '开始默写', act: 'start-recite', when: fmtDoneAt(at),
         done: pr.ok
       });
     }
@@ -1768,8 +1734,6 @@
 
       draftCard() +
 
-      progressCard() +
-
       '<div class="card">' +
       '<h2 class="card-title">练哪个单元</h2>' +
       '<div class="unit-row">' + unitBtns + '</div>' +
@@ -1798,26 +1762,13 @@
           '<button class="btn btn-soft btn-block" data-act="parent">去批改</button></div>'
         : '') +
 
-      // 「查看批改」单独一张卡，而且按"有没有写错的"换颜色。
-      // 孩子翻它是为了看自己错在哪、好订正 —— 塞在"资料"那堆小灰按钮里等于藏起来了。
-      '<div class="card ' + (wrongN ? 'card-warn' : 'card-cta') + '">' +
-      '<h2 class="card-title">' + (wrongN
-        ? '有 ' + wrongN + ' 条写错过的'
-        : '查看批改') + '</h2>' +
-      '<p class="card-note">' + (wrongN
-        ? '点进去能看到自己当时写成了什么样、家长说了什么 —— 写错的排在最前面。'
-        : (graded
-          ? '家长批过的都在这里，写错的会排在最前面。'
-          : '家长批过之后，这里能看到当时的对错和批注。')) +
-      '</p>' +
-      '<button class="btn btn-primary btn-block" data-act="my-grades">' +
-      (wrongN ? '去看写错的（' + wrongN + ' 条）' : '查看批改' + (graded ? '（' + graded + ' 条）' : '')) +
-      '</button>' +
-      '</div>' +
-      '<div class="card card-quiet">' +
-      '<h2 class="card-title">资料</h2>' +
-      '<p class="card-note">只读查阅：二类字（识字表）、多音字、易错字。</p>' +
-      '<button class="btn btn-ghost btn-block" data-act="ref">二类字 / 多音字 / 易错字</button>' +
+      // 名字直接说清里面是什么 —— 原来叫"资料"，谁也不知道点开有什么。
+      // 它高亮着，是因为这是**唯一一处"只读查阅"的入口**：孩子写完想对对看、
+      // 家长想先过一遍易错点，都从这儿进。
+      '<div class="card card-cta">' +
+      '<h2 class="card-title">识字表组词</h2>' +
+      '<p class="card-note">二类字（识字表）的组词、多音字、易错字 —— 只读查阅，不进练习。</p>' +
+      '<button class="btn btn-primary btn-block" data-act="ref">打开识字表组词</button>' +
       '</div>' +
 
       '<div class="card">' +
@@ -1844,6 +1795,24 @@
       '<button class="btn btn-ghost" data-act="sync">跨设备同步</button>' +
       '</div>' +
       '<p class="card-note">都要家长口令。报告里有练习和批改的全部内容。</p>' +
+      '</div>' +
+
+      // 「查看批改」放最下面：它跟错题本、跟"今天要做的·订正"说的是同一件事
+      // （哪些写错了），只是这里能翻到当时的笔迹 —— 那是要细看时才用的，
+      // 不该挤在第一屏。真有写错的，第一屏的"订正 N 条"会把人带过去。
+      '<div class="card ' + (wrongN ? 'card-warn' : 'card-quiet') + '">' +
+      '<h2 class="card-title">' + (wrongN
+        ? '有 ' + wrongN + ' 条写错过的'
+        : '查看批改') + '</h2>' +
+      '<p class="card-note">' + (wrongN
+        ? '点进去能看到自己当时写成了什么样、家长说了什么 —— 写错的排在最前面。'
+        : (graded
+          ? '家长批过的都在这里，写错的会排在最前面。'
+          : '家长批过之后，这里能看到当时的对错和批注。')) +
+      '</p>' +
+      '<button class="btn btn-soft btn-block" data-act="my-grades">' +
+      (wrongN ? '去看写错的（' + wrongN + ' 条）' : '查看批改' + (graded ? '（' + graded + ' 条）' : '')) +
+      '</button>' +
       '</div>' +
 
       '<p class="footnote">不填家庭码时，数据只保存在这台设备上。</p>';
@@ -2259,7 +2228,7 @@
 
     return '' +
       '<div class="topbar"><button class="btn-icon" data-act="home">←</button>' +
-      '<span class="topbar-title">资料 · ' + esc(u.name.split('　')[0]) + '</span>' +
+      '<span class="topbar-title">识字表组词 · ' + esc(u.name.split('　')[0]) + '</span>' +
       '<span class="topbar-right"></span></div>' +
       '<div class="card"><div class="unit-row">' + unitBtns + '</div></div>' +
       '<div class="card"><h2 class="card-title">二类字（识字表 · 只认不写）</h2>' +
@@ -3658,13 +3627,6 @@
       mkList.forEach(function (m) { app.state.mistakeDone[m.key] = mkNow; });
       saveState();
       app.message = '';
-      return render();
-    }
-    // 「本周课堂」里点某一课：直接把单元和课时切过去，省得先找单元再找课
-    if (act === 'goto-lesson') {
-      app.state.unit = t.getAttribute('data-u') || app.state.unit;
-      app.state.lesson = t.getAttribute('data-l') || 'all';
-      saveState();
       return render();
     }
     if (act === 'ack-feedback') {

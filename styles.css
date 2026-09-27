@@ -217,7 +217,30 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.today-done { flex: none; font-size: 12.5px; font-weight: 700; color: var(--ok); }
+/* 做完了报具体时刻（今天 14:30 练过 / 昨天练过 / 9月25日 练过）——
+   孩子看日期自己决定要不要再来一遍，不用猜"这算不算今天做过"。 */
+.today-done {
+  flex: none;
+  max-width: 45%;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ok);
+}
+/* 还没做完、但以前练过：日期标签放在按钮上方 */
+.today-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+.today-when {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
 .today-row .btn { flex: none; }
 /* 试卷式题面：拼音标在挖空的正上方，和平时测验的卷子一个样子 */
 .exam-word { display: inline-flex; align-items: flex-end; }
