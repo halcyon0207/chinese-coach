@@ -712,6 +712,31 @@
     };
   }
 
+  // 一个点属于哪一格：**最近的那一格**（不是在格内就返回 -1）。
+  //
+  // 为什么非得给个归属：一笔的全部点都按"起笔那一格"的坐标存（见 setupCanvas 里的
+  // normAt）。起笔点如果正好落在两格之间的缝里、或者写在格子外面一点点，
+  // 以前这里返回 -1 —— 那一笔就退回去用"整块画布"的比例存坐标。
+  // 两种坐标系混在同一题里，本机看不出问题（怎么存的就怎么画回来），
+  // 但**跨设备回放会散架**：练习页的格子竖着一列，画布又窄又长；
+  // 批改页是 2×2，画布又宽又扁 —— 同一个"画布比例"在两处画出来天差地别。
+  // 家长看到的就是"liè 的 l 单独跑到 dì 后面去了"（本机 2026-09-27 实测）。
+  function cellAtPoint(L, n, p) {
+    if (!L || !p || !n) return -1;
+    var best = -1, bestD = Infinity;
+    for (var i = 0; i < n; i++) {
+      var c = i % L.cols, r = Math.floor(i / L.cols);
+      var x = L.pad + c * (L.w + L.gap);
+      var y = L.pad + r * (L.h + L.gap);
+      // 点到格子的距离：落在格子里面就是 0，落在缝里/格外就是到边界的距离
+      var dx = Math.max(x - p.x, 0, p.x - (x + L.w));
+      var dy = Math.max(y - p.y, 0, p.y - (y + L.h));
+      var d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; if (d === 0) return i; }
+    }
+    return best;
+  }
+
   function drawCells(ctx, n, W, type, forceCols, vertical) {
     var L = cellLayout(n, W, type, forceCols, vertical);
     for (var i = 0; i < n; i++) {
@@ -1015,7 +1040,10 @@
       else if (penLive() || (penAt && Date.now() - penAt < 400)) return;
       if (cv.setPointerCapture) { try { cv.setPointerCapture(e.pointerId); } catch (err) {} }
       var p = posOf(cv, e);
-      var anchor = cellAt(p);
+      // 起笔落在两格之间的缝里、或写在格子外面一点点，也要归到**最近的那一格**。
+      // 归到 -1 的话这一笔会改用"整块画布"的比例存（见 normAt），
+      // 跨设备回放就会错位 —— 详见面 cellAtPoint 的注释。
+      var anchor = cellAtPoint(geo.L, geo.n, p);
       // 如果上一笔刚被 pointercancel 打断（手掌识别 / 系统手势），且是同一类指针，
       // 就接着上一笔写 —— 断点处连上，字不会从中间断成两截。
       var graceType = isPen ? 'pen' : (e.pointerType || '');
@@ -1101,7 +1129,11 @@
       if (s.dead) return;
       // 在格子外点了一下（不是写字）：不留痕迹。
       // 起点是刚落笔时补画上去的，得重画一遍才抹得掉。
-      if (s.pts.length === 1 && s.cell < 0) {
+      //
+      // 这里判的是"落笔点有没有落在某个格子里"（cellAt，严格的），不是 s.cell ——
+      // s.cell 现在总会给一个最近的格（为了让笔迹跨设备还原时不走样），
+      // 拿它来判的话，在格子外的空白处轻点一下也会留下一个小点。
+      if (s.pts.length === 1 && cellAt(s.downPos) < 0) {
         dropStroke(s);
         geo.redraw();
       }
@@ -1132,7 +1164,7 @@
         cancelGrace[type] = null;
         if (e.pointerType === 'pen') penAt = Date.now();
         if (s.dead) return;
-        if (s.pts.length === 1 && s.cell < 0) {
+        if (s.pts.length === 1 && cellAt(s.downPos) < 0) {
           dropStroke(s);
           geo.redraw();
         }
