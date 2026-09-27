@@ -252,20 +252,18 @@
     return (md === 'py2word' && typeof rec.note === 'string') ? rec.note : '';
   }
 
-  /* ------------------------- 课时范围（可以多选） -------------------------
+  /* ------------------------------ 课时范围 ------------------------------
    *
-   * 家长的原话："练哪一课可以单选也可以多选。"
-   * 所以这个范围可能不止一课：存法是 'all'（整个单元）或 '1,2'（第 1、2 课）。
+   * 「练哪一课」是**单选**：'all'（整个单元）或某一课。存的就是一个字符串。
    *
-   * 为什么用逗号串、不用数组：它是会一路传下去的东西 —— 草稿、复习批次、
-   * 教案页、存档校验（store.js 里按"字符串"校验过一遍）。换成数组要同时放宽
-   * 六七处校验，而那些地方其实只问一件事："这一课在不在选的范围里"。
-   * 串只在这里拆、在这里拼，中间环节看见的仍然是一个字符串。
+   * lessonNos / lessonHit / lessonIsAll 这一组只干一件事：把"整个单元"这个特例
+   * 收进来。没有它们的话，"整个单元"要在出题过滤、教案页、草稿卡里各写一次 if。
+   * 它们对单个课号同样成立，所以中间那些地方不必关心"到底选的是哪个"。
    */
   function lessonNos(lesson) {
     var s = (lesson === undefined || lesson === null) ? '' : String(lesson);
     if (!s || s === 'all') return null;   // null = 不限课（整个单元）
-    return s.split(',').filter(function (x) { return !!x; });
+    return [s];
   }
 
   // 这一课在不在当前选的课时里
@@ -279,19 +277,6 @@
   }
 
   function lessonIsAll(lesson) { return !lessonNos(lesson); }
-
-  // 把选中的课号拼回串，并按课号在单元里的先后排好（'2,1' → '1,2'）。
-  // 排序不只是为了好看：复习批次是拿这个串判断"是不是同一批范围"的，
-  // 点的先后不同、串就不同，会被当成"换了范围"而白白作废一批。
-  function joinLesson(nos, unitId) {
-    if (!nos || !nos.length) return 'all';
-    var u = D.byId(unitId);
-    var order = u ? (u.lessons || []).map(function (l) { return String(l.no); }) : [];
-    var sorted = nos.slice().sort(function (a, b) {
-      return order.indexOf(String(a)) - order.indexOf(String(b));
-    });
-    return sorted.join(',');
-  }
 
   function lessonLabel(ln) {
     return ln.no ? ('第 ' + ln.no + ' 课') : '语文园地';
@@ -1837,8 +1822,10 @@
           var mark = p.done >= p.total
             ? '<span class="when done">✓</span>'
             : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
-          // 课时可以多选，所以高亮跟着走（lessonHit 认 '1,2' 这种多选范围）
-          return '<button class="unit-btn' + (lessonHit(ln.no, lesson) ? ' on' : '') +
+          // 高亮必须是**单选**：只有选中的那一课亮。
+          // 这里不能用 lessonHit —— 它对 'all'（整个单元）返回 true，
+          // 于是每节课都跟着亮（家长截图里"整个单元 + 第4课 + 第5课全亮"就是这么来的）。
+          return '<button class="unit-btn' + (String(lesson) === String(ln.no) ? ' on' : '') +
             '" data-act="lesson" data-l="' + esc(ln.no) + '">' +
             esc(label) + '（' + n + '）' + mark +
             '</button>';
@@ -1876,7 +1863,7 @@
       '<h2 class="card-title">练哪一课</h2>' +
       '<p class="card-note">' + (pick === 'all'
         ? '「综合」要练的几个单元在这里点（点一下选中、再点一下取消；一个都不点就是全部单元）。'
-        : '跟课堂进度走，学到哪一课就练哪一课。可以点好几课一起练；点「整个单元」就是整单元。') + '</p>' +
+        : '跟课堂进度走，学到哪一课就练哪一课；点「整个单元」就练整单元。') + '</p>' +
       '<div class="unit-row">' + lessonBtns + '</div>' +
       '</div>' +
 
@@ -3716,6 +3703,9 @@
   // 在首页上点这些按钮是"原地刷新"，不换页面 —— 不该记位置，也不该滚。
   var HOME_STAY = {
     unit: 1, lesson: 1, mode: 1, range: 1,
+    // 「综合」里点单元同样是原地变化，漏了它就会被当成"要跳去别的页面"，
+    // 于是每点一下都把页面滚到那个按钮那儿 —— 家长的原话是"会在页面上跳动"。
+    'mix-unit': 1,
     'drop-draft': 1, 'ack-feedback': 1, home: 1
   };
 
@@ -3776,20 +3766,10 @@
       saveState();
       return render();
     }
-    // 「练哪一课」：可以点好几课（家长的原话："练哪一课可以单选也可以多选"）。
-    // 「整个单元」和具体课时**互斥**（这条也是家长定的）：点「整个单元」就是整单元
-    // （具体课自动取消）；点某一课就变成"只练这几课"；把最后一课也取消，
-    // 自动回到"整个单元" —— 不会出现"什么都没选"。
+    // 「练哪一课」：**单选**。家长的原话："每个单元下'练哪一课'还是改成单选，
+    // 多选的意义不大（已经有整个单元这个选择了）。"
     if (act === 'lesson') {
-      var lno = t.getAttribute('data-l') || 'all';
-      if (lno === 'all') {
-        app.state.lesson = 'all';
-      } else {
-        var nos = lessonNos(app.state.lesson) || [];
-        var at = nos.indexOf(String(lno));
-        if (at >= 0) nos.splice(at, 1); else nos.push(String(lno));
-        app.state.lesson = joinLesson(nos, app.state.unit);
-      }
+      app.state.lesson = t.getAttribute('data-l') || 'all';
       saveState();
       return render();
     }
