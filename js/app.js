@@ -279,6 +279,17 @@
     return word.split('').map(function (c) { return c === ch ? '（　）' : c; }).join('');
   }
 
+  // 试卷式排版：拼音标在挖空的**正上方**，像纸质试卷那样。
+  // 词的每个字一格；要写的那一格上方是它的拼音，其余格上方留空。
+  // 这样孩子看到的和平时测验的卷子是一个样子，题面不需要重新学习。
+  function examBlank(py, word, ch) {
+    var cells = word.split('').map(function (c) {
+      return c === ch ? '<span class="cw"><i>' + esc(py) + '</i><b>（　）</b></span>'
+                      : '<span class="cw"><b>' + esc(c) + '</b></span>';
+    });
+    return '<span class="exam-word">' + cells.join('') + '</span>';
+  }
+
   // 这道题到底给什么提示。两种，优先给词：
   //   · word —— 词（"寂静"），是本字在教材词语表里出现过的搭配；
   //              顺带还复习了这个词的写法，所以能用词就用词。
@@ -1556,6 +1567,67 @@
       '</div>';
   }
 
+  /* ---------------------- 错题本 ----------------------
+   *
+   * 家长批改完，错的那些要去哪？平板上有"当场订正"和隔天的间隔复习，
+   * 但家长实际的做法往往是：让孩子**在本子上用笔再写一遍**。那就要有一份
+   * 拿着能用的清单 —— 这张卡就是它。
+   *
+   * 数据**不另记一份**：错题本要是自己记一套账，早晚和批改记录对不上。
+   * 直接从批改历史里现算，口径是"**这个字（词）最近一次的结果是错的**"——
+   * 在平板上把它练对一次，它就自动从清单里消失，不用回来打勾。
+   *
+   * 清单上**只显示拼音和题型，不显示字本身**：孩子要是照着字抄，
+   * 那就不是订正了。看拼音写生字的那类字，提示词照给（和练习时一样）。
+   */
+  function mistakeItems() {
+    var latest = {}, wrongN = {};
+    (app.state.history || []).forEach(function (h) {
+      var k = (h.kind || 'w') + ':' + (h.key || h.text);
+      if (!latest[k] || (h.ts || 0) >= latest[k].ts) latest[k] = h;
+      if (!h.isCorrect) wrongN[k] = (wrongN[k] || 0) + 1;
+    });
+    var out = [];
+    Object.keys(latest).forEach(function (k) {
+      var h = latest[k];
+      if (h.isCorrect) return;   // 最近一次是对的 —— 已经订正过了
+      out.push({
+        key: k, text: h.text || '', py: h.py || '', kind: h.kind || 'w',
+        ts: h.ts || 0, wrongN: wrongN[k] || 1
+      });
+    });
+    out.sort(function (a, b) { return b.ts - a.ts; });   // 最近错的排前面
+    return out;
+  }
+
+  var MISTAKE_SHOW = 12;   // 首页最多列这么多 —— 太长孩子会把它当成作业清单而不是提示
+  function mistakeCard() {
+    var list = mistakeItems();
+    if (!list.length) return '';
+    var rows = list.slice(0, MISTAKE_SHOW).map(function (m, i) {
+      var sub = (KIND_NAME[m.kind] || m.kind) + ' · 错 ' + m.wrongN + ' 次 · ' + esc(fmtDay(m.ts));
+      var tip = '';
+      if (m.kind === 'c') {
+        var w = hintWordOf(m.text, null);
+        if (w) tip = '<div class="mk-hint">' + esc(hintText(w, m.text)) + '</div>';
+      }
+      return '<div class="mk-row">' +
+        '<span class="mk-no">' + (i + 1) + '</span>' +
+        '<div class="mk-main"><span class="mk-py">' + esc(m.py) + '</span>' + tip + '</div>' +
+        '<span class="mk-sub">' + sub + '</span>' +
+        '</div>';
+    });
+    var more = list.length > MISTAKE_SHOW
+      ? '<p class="card-note">还有 ' + (list.length - MISTAKE_SHOW) + ' 条 —— 先把上面的写掉。</p>'
+      : '';
+    return '<div class="card card-mistake">' +
+      '<h2 class="card-title">错题本（' + list.length + '）</h2>' +
+      '<p class="card-note">照着拼音，在本子上把每个字（词）写一行。' +
+      '写完之后在平板上把这个字再练对一次，它就从这里消失。</p>' +
+      rows.join('') + more +
+      '</div>';
+  }
+
   // 原来的「今天该复习」单独占一张卡，现在并进了「今天要做的」清单里
   // （同一件事不必说两遍）。间隔复习的入口和说明都还在，只是不再另起一张卡 ——
   // 这张卡原来是间隔复习唯一能被孩子看见的地方，并过去的时候别把这个入口弄丢。
@@ -1628,6 +1700,9 @@
       // 「今天要做的」放最上面（家长刚批的那张卡之后）：它回答的就是
       // "今天该做什么"，而原来这件事分散在四五张卡里，谁也答不上来。
       todayCard() +
+
+      // 错题本：家长批完之后，错的那些字（词）在这里汇成一份照着写的清单。
+      mistakeCard() +
 
       draftCard() +
 
@@ -1807,18 +1882,20 @@
     var pendingCount = (app.state.pending || []).length;
     var lastAt = lastAtOf(it);
     var stemLabel = isZ ? '给字组词' : (isPy ? '看拼音写' : '看词语写拼音');
-    // 看拼音写生字：拼音下面再给一个提示，把"是哪个字"定住（见 hintOf 的说明）。
+    // 看拼音写生字：给一个提示词，把"是哪个字"定住（见 hintOf 的说明）。
+    // 有词的按试卷式排（拼音在挖空的正上方，不再单独把拼音摆一遍）；
+    // 没词的（语气词）退回"拼音 + 一句说明"。
     // 只在"看拼音写"这一向给 —— 反过来的"看词语写拼音"，字就摆在眼前，用不着提示。
     var hint = (it.kind === 'c' && isPy) ? hintOf(it.text, it.no) : { word: '', note: '' };
-    var hintHtml = hint.word
-      ? esc(hintText(hint.word, it.text))
-      : (hint.note ? '（' + esc(hint.note) + '）' : '');
     var stemBody = isZ
       ? '<span class="zuci-char">' + esc(it.text) + '</span>' +
         '<span class="zuci-py">' + esc(it.py) + '</span>' +
         '<span class="zuci-tip">给它组 ' + it.words + ' 个词</span>'
       : (isPy
-        ? esc(it.py) + (hintHtml ? '<span class="hint-word">' + hintHtml + '</span>' : '')
+        ? (hint.word
+          ? examBlank(it.py, hint.word, it.text)
+          : esc(it.py) + (hint.note
+            ? '<span class="hint-word">（' + esc(hint.note) + '）</span>' : ''))
         : esc(it.text));
     var hint = isZ
       ? ('一行写一个词，共 ' + it.words + ' 个词（每个词 2～4 个字都行，写不满空着即可）')
@@ -3861,6 +3938,8 @@
       hintWordOf: hintWordOf,
       hintOf: hintOf,
       hintText: hintText,
+      examBlank: examBlank,
+      mistakeItems: mistakeItems,
       gradingQueue: gradingQueue,
       applyRemoteGrades: applyRemoteGrades,
       reportSnapshot: reportSnapshot

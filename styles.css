@@ -219,6 +219,54 @@ html, body {
 }
 .today-done { flex: none; font-size: 12.5px; font-weight: 700; color: var(--ok); }
 .today-row .btn { flex: none; }
+/* 试卷式题面：拼音标在挖空的正上方，和平时测验的卷子一个样子 */
+.exam-word { display: inline-flex; align-items: flex-end; }
+.exam-word .cw { display: inline-flex; flex-direction: column; align-items: center; }
+.exam-word .cw i {
+  font-style: normal;
+  font-size: 15px;
+  color: var(--primary);
+  line-height: 1.1;
+  margin-bottom: 2px;
+}
+.exam-word .cw b { font-weight: normal; font-size: 21px; }
+
+/* 错题本：照着拼音在本子上写的一张清单。
+   故意不显示字本身 —— 孩子要是照着字抄，那就不是订正了。 */
+.card-mistake { border-left: 3px solid var(--warn); }
+.mk-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.mk-row:last-of-type { border-bottom: none; }
+.mk-no {
+  flex: none;
+  width: 20px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 700;
+  padding-top: 2px;
+}
+.mk-main { flex: 1; min-width: 0; }
+.mk-py {
+  display: block;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text);
+}
+.mk-hint { font-size: 13.5px; color: var(--muted); margin-top: 2px; }
+.mk-sub {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 4px;
+  text-align: right;
+}
+
 /* 看拼音写生字时的提示词：拼音下面一行小字。
    它只帮孩子确定"是哪个字"，不透露半个字形 —— 所以做得低调些，
    让注意力仍然落在拼音上，别一上来就被词带着走。 */
