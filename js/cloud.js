@@ -440,10 +440,13 @@
     var resume = doneIds.length > 0;
     var todo = all.filter(function (it) { return !pushed[it.id]; });
     if (!todo.length) {   // 上次其实全传上去了，只是回信没等到
-      s.workPushed = [];
+      // 这里**不能清 workPushed**：pending 里那些条目还留着等家长批改，
+      // 清掉的话下次点「提交给家长批改」会把整队再传一遍
+      //（家长的原话："刚刚已经成功提交了，现在点一下又重新开始提交一遍了"）。
       lastError = '';
       if (hooks.onStatus) hooks.onStatus();
-      return Promise.resolve({ ok: true, count: all.length, batches: 0 });
+      // skipped：让界面照实说"这次没有要新传的"，而不是又报一遍"已提交 102 条"
+      return Promise.resolve({ ok: true, skipped: true, count: all.length, batches: 0 });
     }
 
     var batches = [];
@@ -518,7 +521,12 @@
 
     return chain.then(function () {
       lastError = '';
-      s.workPushed = [];
+      // 传完了也**不能**把这份账整份销掉 —— 理由同上：pending 里那些还等着家长批，
+      // 销掉之后每点一次「提交」就整队重传一次（100 多条、二十多批，好几分钟）。
+      // 只摘掉已经不在待批队列里的 id（家长批完就没了），账不会越攒越长。
+      var live = {};
+      all.forEach(function (it) { live[it.id] = 1; });
+      s.workPushed = doneIds.filter(function (id) { return live[id]; });
       save();                  // 传完了：把"还有没传的"这份账销掉
       if (grades.length && hooks.applyGrades) hooks.applyGrades(grades);
       if (hooks.onStatus) hooks.onStatus();

@@ -1572,6 +1572,31 @@
       '</div>';
   }
 
+  // 待家长批改的那一批 —— 首页给一个明确的「提交」入口。
+  //
+  // 为什么首页要再放一个：孩子把一整摊做完会**自动回首页**，练习页底部那个
+  // "提交给家长批改"就够不着了。家长的原话是 —— "做完一个项目最后他就自动返回了
+  // 首页……如果不是自动提交的话，要在哪里准确点到提交这个按钮呢"
+  // 明确回答：**不会自动传**，就是要在这儿点。
+  function pendingCard() {
+    var n = (app.state.pending || []).length;
+    if (!n) return '';
+    var size = pendingSizeText();   // "待家长批改 102 条 · 约 1013 KB"
+    return '<div class="card card-due">' +
+      '<h2 class="card-title">' + esc(size || ('待家长批改 ' + n + ' 条')) + '</h2>' +
+      '<p class="card-note">写完只是攒在这台设备上，<b>点下面的按钮才会传给家长</b>——' +
+      '不会自动上传。家长在手机或电脑上打开批改页就能看到。</p>' +
+      '<div class="action-row">' +
+      '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
+      '<button class="btn btn-primary" data-act="submit-work"' +
+      (app.submitting ? ' disabled' : '') + '>' +
+      (app.submitting ? '正在提交…' : '提交给家长批改') +
+      '</button>' +
+      '</div>' +
+      (app.submitMsg ? '<div class="feedback info">' + esc(app.submitMsg) + '</div>' : '') +
+      '</div>';
+  }
+
   function todayCard() {
     var st = app.state;
     var fb = st.feedback || [];
@@ -1951,6 +1976,8 @@
 
       draftCard() +
 
+      pendingCard() +
+
       '<div class="card">' +
       '<h2 class="card-title">练哪个单元</h2>' +
       // 说明文字跟着走：点了「综合」之后要告诉家长"接下来该干什么"，
@@ -2221,8 +2248,10 @@
       '<button class="btn btn-soft" data-act="clear">重写全部</button>' +
       '<button class="btn btn-primary" data-act="submit">写好了</button>' +
       '</div>' +
-      // 交的时机是"整轮写完"（那时会自动交），不是写一条交一条。
-      // 这个按钮是给"我想早点让家长看到"用的：点一下把已经写好的**一起**交上去。
+      // **不会自动传**（家长专门问过这个）：写完只是攒在本机，点这个按钮才传上去。
+      // 这个按钮给"我想早点让家长看到"用：点一下把已经写好的**一起**交上去。
+      // 整轮写完会自动回首页，练习页这个按钮就够不着了 —— 所以首页还有一个
+      // 一模一样的入口（见 pendingCard）。
       // 待传的那一批有多大 —— 这个数直接决定"能不能一趟发出去"，
       // 而它恰恰是提交失败时最想知道、又最看不见的东西。摆在按钮旁边，不用猜。
       (pendingSizeText()
