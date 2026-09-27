@@ -556,17 +556,24 @@
   //
   // 旧格式（历史笔迹，直接是像素点）照原样画，不至于让老记录变成一片乱线。
   function pointXY(pt, st, geo) {
-    if (!pt || typeof pt.u !== 'number') return { x: pt.x, y: pt.y };
+    // 三种点格式都要认，同一个页面上三种都会遇到：
+    //   [u,v] —— 整数百分比（上传过、或从云端回来的；一个点 8 字节）
+    //   {u,v} —— 0~1 小数（本机刚写的，以及历史记录里的老点）
+    //   {x,y} —— 像素（很早以前的记录，照原样画，别让老记录变成一片乱线）
+    var u, v;
+    if (Array.isArray(pt)) { u = pt[0] / 100; v = pt[1] / 100; }
+    else if (pt && typeof pt.u === 'number') { u = pt.u; v = pt.v; }
+    else return { x: pt.x, y: pt.y };
     var lay = geo && geo.L;
     var cell = (st && typeof st.cell === 'number') ? st.cell : -1;
     if (lay && cell >= 0 && cell < (geo.n || 0) && lay.w > 0 && lay.h > 0) {
       var col = cell % lay.cols, row = Math.floor(cell / lay.cols);
       var x = lay.pad + col * (lay.w + lay.gap);
       var y = lay.pad + row * (lay.h + lay.gap);
-      return { x: x + pt.u * lay.w, y: y + pt.v * lay.h };
+      return { x: x + u * lay.w, y: y + v * lay.h };
     }
     // 落在格子外的点：按整块画布的比例还原
-    return { x: pt.u * (geo.W || 1), y: pt.v * (geo.H || 1) };
+    return { x: u * (geo.W || 1), y: v * (geo.H || 1) };
   }
 
   var INK = '#e8590c';

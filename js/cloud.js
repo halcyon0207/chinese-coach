@@ -220,9 +220,24 @@
   var MIN_PT_DIST = 0.02;       // 格宽的 2%（约 2px），比这更密的点回放时看不出来
   var MAX_PTS_PER_STROKE = 12;  // 单笔最多留这么多点，一笔的形状还在
 
+  // 点坐标打包成 [u, v] 整数百分比（0~100）。
+  //
+  // 为什么值得专门做这件事：一个点从 {"u":0.12,"v":0.34} 的 23 字节降到 [12,34] 的 8 字节。
+  // 而这份数据就是上传体积的主体 —— 孩子 43 条作业 539KB，点占了绝大部分，
+  // 而这条路 120KB 的请求就发不出去了（实测），于是 43 条被切成了十几批、传了 166 秒。
+  // 打包之后文件瘦到三分之一，一批能装的条数翻几倍，批数和耗时跟着一起降。
+  //
+  // 精度 1% 格宽：抽稀的阈值本来就是 2%，千分位的差别回放时根本看不出来。
+  // 云函数那边认两种格式（老格式照样收），回放那边也认两种 ——
+  // 本机历史里、还有别的设备上，都还存着一批 {"u":…,"v":…} 的老点。
+  function packPt(p) {
+    if (Array.isArray(p)) return p;   // 已经是打包过的（从云端回来的）
+    return [Math.round(p.u * 100), Math.round(p.v * 100)];
+  }
+
   function thinPts(pts) {
     var list = Array.isArray(pts) ? pts : [];
-    if (list.length <= 2) return list.slice();
+    if (list.length <= 2) return list.map(packPt);
 
     var out = [list[0]];
     for (var i = 1; i < list.length - 1; i++) {
@@ -240,7 +255,7 @@
       thin.push(out[out.length - 1]);
       out = thin;
     }
-    return out;
+    return out.map(packPt);
   }
 
   // 给报告快照也留个入口：家长在自己手机上看报告时，那份笔迹同样要瘦过身
