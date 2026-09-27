@@ -2203,9 +2203,13 @@
       '<p class="card-note">另一台设备在同一个地方填上这个码就对上了。' +
       '知道这个码的人能看报告、也能批改 —— 别发给外人。</p>' +
       '<p class="card-note">' + esc(F.statusText()) + '</p>' +
+      (app.cloudMsg ? '<div class="feedback info">' + esc(app.cloudMsg) + '</div>' : '') +
       '<div class="action-row">' +
+      // 「测一下网络」：提交没上去的时候，家长最需要知道的就是"是网的问题还是别的"。
+      // 没有它，屏幕上只有一句"连不上同步服务器"，家里连着 WiFi 的家长只会反复点提交。
+      '<button class="btn btn-soft" data-act="sync-check">测一下网络</button>' +
       '<button class="btn btn-ghost" data-act="sync-new">换一个码</button>' +
-      '<button class="btn btn-soft" data-act="sync-off">关掉同步</button>' +
+      '<button class="btn btn-ghost" data-act="sync-off">关掉同步</button>' +
       '</div>' +
       '</div>';
   }
@@ -2837,6 +2841,24 @@
   // 这里刻意先标脏再传。cloud.js 的 flushWork 有一条"没有新写的就别白跑一趟"，
   // 而这个按钮是明确要联网的动作 —— 点了却不发请求、界面什么都不发生，
   // 看起来就像坏了。所以先 markWorkDirty，让这次一定走一趟。
+  // 没传上去之后该干什么 —— 按错法分开说，不能一律"换到有网的地方"。
+  // 原因是这句话会骗人：家长明明连着 WiFi（截图上就是），看到它只会以为自己没网，
+  // 然后一遍遍点提交，而真正该做的是换个网络。三种错法是三件事：
+  //   · 连不上 —— 这台设备到服务器这段路不通 → 换网络（手机热点最快）
+  //   · 超时   —— 服务器没回话 → 再点一次，只补没传完的
+  //   · 其它   —— 服务端自己报的错（限频、版本、装不下）→ 按它说的做
+  function submitFailHint(err) {
+    if (/连不上|Failed to fetch|Load failed|NetworkError/i.test(err)) {
+      return '这台设备连不上同步服务器 —— 不是你这边没网，是到服务器这段路不通。' +
+        '换个网络最快（让家长开个手机热点，平板连上再点一次）；' +
+        '也可以让家长点开「跨设备同步」里的「测一下网络」看一眼。';
+    }
+    if (/超时/.test(err)) {
+      return '服务器太慢没回话，再点一次就只补没传完的那些（已经上去的不会重复）。';
+    }
+    return '再点一次试试；要是一直不行，让家长点开「跨设备同步」看看状态。';
+  }
+
   function submitWork() {
     var n = (app.state.pending || []).length;
     if (!n) {
@@ -2890,7 +2912,7 @@
         app.submitMsg = sent
           ? ('传上去 ' + sent + ' 条，还剩 ' + Math.max(n - sent, 0) + ' 条没传上去（' + err + '）。' +
              '再点一次「提交给家长批改」会把剩下的接着传完 —— 已经上去的不会重复。')
-          : ('没提交上去（' + err + '）。写的字还在本机上，换到有网的地方再点一次就行。');
+          : ('没提交上去（' + err + '）。写的字还在本机上，' + submitFailHint(err));
       }
       render();
     });
@@ -3538,6 +3560,35 @@
       saveState();
       return render();
     }
+    // 「测一下网络」：只回答一件事 —— 这台设备到同步服务器这条路通不通、走一趟多久。
+    // 结果要说成人话，并且两种结果给出**各自该做的事**：
+    // 通了就别再怀疑网络（问题在服务端或这批数据）；不通就换网络，而不是继续点提交。
+    if (act === 'sync-check') {
+      if (!F || !F.on()) return render();
+      app.cloudMsg = '正在测…';
+      render();
+      F.checkNetwork().then(function (r) {
+        var d = r.direct, p = r.post;
+        var line1 = d.ok
+          ? ('① 直接连服务器：通（服务器回话 ' + d.status + '，' + d.ms + ' 毫秒）')
+          : ('① 直接连服务器：不通（' + d.error + '）');
+        var line2 = p.ok
+          ? ('② 提交用的那种请求：通（' + p.ms + ' 毫秒）')
+          : ('② 提交用的那种请求：连不上（' + p.error + '）');
+        // 三种组合对应三件完全不同的事，所以三句话分开说 —— 这是这一步的全部意义
+        var tail = p.ok
+          ? '两步都通 —— 这条路没问题。提交还是失败的话，多半是服务端正忙，隔一会儿再点一次。'
+          : (d.ok
+            ? '第一步通、第二步不通：说明是**这台设备的浏览器**把网页里发出的请求拦了' +
+              '（它的"安全防护 / 广告过滤"就是干这个的）。在它的网站设置里把防护关掉，' +
+              '或者换一个浏览器打开这个页面。'
+            : '两步都不通：这台设备到服务器的路整个不通，换个网络最快（手机开热点，平板连上再试）。');
+        app.cloudMsg = line1 + '　' + line2 + '　' + tail;
+        render();
+      });
+      return;
+    }
+
     if (act === 'sync-join') {
       if (!F) return;
       var code = String(app.famInput || '').trim().toLowerCase();

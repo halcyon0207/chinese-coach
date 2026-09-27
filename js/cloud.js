@@ -159,9 +159,26 @@
     });
   }
 
+  // 浏览器的 fetch 失败给的是各家自己的原文 —— Chrome 说 Failed to fetch、
+  // Safari 说 Load failed、Firefox 说 Network request failed。家长看不懂，
+  // 更麻烦的是**会被误导**：屏幕上写着这句，家长只会想"我明明连着网啊"。
+  //
+  // 所以翻成人话，并把两件事分开，因为处理办法完全不同：
+  //   · 连不上 —— 请求压根没落地（DNS 解析不出 / 连接建不起来 / 被网络层拦掉）→ 换网络
+  //   · 超时   —— 发出去过，服务器没回话 → 再点一次就只补没传完的
+  function friendly(e) {
+    var m = String((e && e.message) || '');
+    if (!m) return '连不上';
+    if (/超时/.test(m)) return '服务器没回话（超时）';
+    if (/Failed to fetch|Load failed|Network request failed|NetworkError/i.test(m)) {
+      return '这台设备连不上同步服务器';
+    }
+    return m;
+  }
+
   // 失败统一记一句就完事：同步出问题不能打断孩子写字，也不能弹错误框吓家长
   function note(e) {
-    lastError = (e && e.message) || '连不上';
+    lastError = friendly(e);
     if (hooks.onStatus) hooks.onStatus();
   }
 
@@ -319,6 +336,37 @@
         return post(body);
       });
     });
+  }
+
+  // 「测一下网络」：分两步问，因为这两步的结果**可以不一样** —— 而不一样的时候，
+  // 恰好就是最难解释的那种现象。
+  //
+  //   ① 直接连服务器（GET）：你在浏览器地址栏里打开那个网址，走的就是这一类。
+  //      它通，说明域名解析、连接、证书、来回全都没问题。
+  //   ② 网页里脚本发出去的请求（POST，就是提交作业那一趟）：有些浏览器的"安全防护 /
+  //      广告过滤"只拦第 ② 种 —— 它们把"网页自己发起的请求"当广告或追踪打掉。
+  //      于是就成了"网址打得开，但作业提交不上去"。
+  //
+  // 两步一起报，"连不上"才不再是一句没用的废话：第一步通、第二步不通，答案就写在脸上。
+  function checkNetwork() {
+    if (!on()) return Promise.resolve({ ok: false, error: '没开同步' });
+    var s = sync();
+    var t1 = nowTs();
+    // ① 只要求"有响应"，哪怕它是 400 —— 服务器收到了、也回话了，这就叫通
+    return fetch(API_BASE, { method: 'GET', cache: 'no-store' })
+      .then(function (r) { return { ok: true, status: r.status, ms: nowTs() - t1 }; },
+            function (e) { return { ok: false, ms: nowTs() - t1, error: friendly(e) }; })
+      .then(function (direct) {
+        var t2 = nowTs();
+        return post({ action: 'hello', fam: s.fam, dev: s.dev }).then(function () {
+          return { direct: direct, post: { ok: true, ms: nowTs() - t2 } };
+        }, function (e) {
+          // 顺手把状态记上：测出来不通，报告页那句状态也就跟着说实话了
+          lastError = friendly(e);
+          if (hooks.onStatus) hooks.onStatus();
+          return { direct: direct, post: { ok: false, ms: nowTs() - t2, error: friendly(e) } };
+        });
+      });
   }
 
   // 返回 { ok }: 界面上那个提交按钮要照着说一句实话 ——
@@ -569,6 +617,7 @@
     newCode: newCode,
     codeError: codeError,
     statusText: statusText,
+    checkNetwork: checkNetwork,
     markWorkDirty: markWorkDirty,
     flushWork: flushWork,
     thinStrokes: thinStrokes,
