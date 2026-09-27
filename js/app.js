@@ -128,16 +128,38 @@
   // mode：只看某一个方向（"看拼音写词语" / "看词语写拼音"）。
   // 首页那两行共用同一批字词，不分方向的话，只练了一个方向、另一行也显示
   // "今天练过" —— 家长一眼就看出来了（"我记得拼音好像还没开始练啊"）。
-  function pendingTodayKeys(mode) {
-    var start = todayStart(), out = {};
+  // since：只算这个时刻之后的（0 = 全部，不限哪天）
+  function pendingKeys(mode, since) {
+    var out = {};
     (app.state.pending || []).forEach(function (p) {
-      if ((p.ts || 0) < start) return;
+      if (since && (p.ts || 0) < since) return;
       var it = p.item;
       if (!it || !it.kind || !it.text) return;
       if (mode && (it.mode || 'py2word') !== mode) return;
       out[keyOf(it)] = 1;
     });
     return out;
+  }
+
+  function pendingTodayKeys(mode) {
+    return pendingKeys(mode, todayStart());
+  }
+
+  // 这一摊里**还没练过**的条目 —— 「继续练」就出这些。
+  //
+  // 判"练过"和首页进度用的是同一套：这个方向上有过记录（含写完还在等家长批的，
+  // 而且**不分哪天** —— 昨天练过的今天也不该再出）。
+  //
+  // 为什么要它：家长的原话 —— "我已经把80个题目全部练完了，但是系统又会自动
+  // 循环80个题目出来（在没有退出界面的情况下）"。原来点「继续练」是**重新开
+  // 一轮 80 条**，孩子做到第 78 条退出，回来又从第 1 条开始 —— 那 78 条白做了。
+  function leftItems(items, mode) {
+    var byMode = modeActivity(mode);
+    var pend = pendingKeys(mode);
+    return (items || []).filter(function (it) {
+      var k = keyOf(it);
+      return !byMode[k] && !pend[k];
+    });
   }
 
   // 某个方向上，每个条目最近一次练过是什么时候。
@@ -686,11 +708,6 @@
     var min = Math.max(0, Math.round((until - Date.now()) / 60000));
     if (min >= 60) return Math.floor(min / 60) + ' 小时' + (min % 60 ? (min % 60) + ' 分' : '');
     return min + ' 分钟';
-  }
-
-  function buildSession(unitId, lesson) {
-    var rng = mulberry32((Date.now() ^ ((unitId || '').length * 2654435761)) >>> 0);
-    return orderByDue(rng, itemsForLesson(unitId, lesson));
   }
 
   // 到期时间按"日历天"算，不按 24 小时整点。
@@ -1657,7 +1674,10 @@
         no: no, title: '写字词 ' + items.length + ' 条',
         sub: '看拼音写词语 · ' + scopeTitle() + ' · ' + progressLine(pw),
         btn: pw.ok ? '再练一次' : (at ? '继续练' : '开始写'), act: 'start-mode',
-        extra: ' data-m="py2word"', when: fmtDoneAt(at), done: pw.ok
+        // 「继续练」只出还没练过的（见 leftItems）—— 不然练了 78 条、退出再进来，
+        // 又从第 1 条重新出 80 条，那 78 条等于白做。
+        extra: ' data-m="py2word"' + (pw.ok ? '' : ' data-only="1"'),
+        when: fmtDoneAt(at), done: pw.ok
       });
       no++;
       // 两行的算法完全一样，**只差方向** —— 所以进度必须各算各的：
@@ -1668,7 +1688,8 @@
         no: no, title: '写拼音 ' + items.length + ' 条',
         sub: '看词语写拼音 · ' + scopeTitle() + ' · ' + progressLine(pw2),
         btn: pw2.ok ? '再练一次' : (at ? '继续练' : '开始写'), act: 'start-mode',
-        extra: ' data-m="word2py"', when: fmtDoneAt(at), done: pw2.ok
+        extra: ' data-m="word2py"' + (pw2.ok ? '' : ' data-only="1"'),
+        when: fmtDoneAt(at), done: pw2.ok
       });
     }
     if (zuciItems.length) {
@@ -1679,6 +1700,7 @@
         no: no, title: '组词 ' + zuciItems.length + ' 条',
         sub: '给字组词，一行一个 · ' + progressLine(pz),
         btn: pz.ok ? '再练一次' : (at ? '继续练' : '开始练'), act: 'start-zuci',
+        extra: pz.ok ? '' : ' data-only="1"',
         when: fmtDoneAt(at), done: pz.ok
       });
     }
@@ -3039,8 +3061,17 @@
   //   · 打开页面 / 从后台切回时各拉一次，其余时间一次请求都不发
 
   /* ============================== 动作 ============================== */
-  function startSession() {
-    app.session = buildSession(selUnits(), app.state.lesson);
+  // onlyLeft：「继续练」传 true —— 只出这一摊里**还没练过**的（见 leftItems）。
+  // 不传（「开始写」/「再练一次」）就出全部，可以整摊重练一遍。
+  function startSession(onlyLeft) {
+    var list = itemsForLesson(selUnits(), app.state.lesson);
+    if (onlyLeft) list = leftItems(list, app.state.mode || 'py2word');
+    if (!list.length) {
+      app.message = '这一摊已经练完了。想再走一遍就点「再练一次」。';
+      return render();
+    }
+    var rngS = mulberry32((Date.now() ^ 0x9e3779b9) >>> 0);
+    app.session = orderByDue(rngS, list);
     app.dueMode = false;   // 不是复习轮：做的题不往复习批次里记账
     app.cursor = 0;
     app.strokes = [];
@@ -3053,10 +3084,13 @@
   }
 
   // 组词训练：从当前单元（或所选课）的二类字出题，写汉字用田字格
-  function startZuci() {
+  function startZuci(onlyLeft) {
     var all = itemsForZuci(selUnits(), app.state.lesson);
+    if (onlyLeft) all = leftItems(all, 'zuci');
     if (!all.length) {
-      app.message = '本单元二类字还没有组词数据，先去资料页看看。';
+      app.message = onlyLeft
+        ? '组词这一摊已经练完了。想再走一遍，回到首页点「再练一次」。'
+        : '本单元二类字还没有组词数据，先去资料页看看。';
       return render();
     }
     var rng = mulberry32((Date.now() ^ 0x9e3779b1) >>> 0);
@@ -3837,7 +3871,8 @@
       var m = t.getAttribute('data-m');
       if (m === 'py2word' || m === 'word2py') app.state.mode = m;
       saveState();
-      return startSession();
+      // 带 data-only 的是「继续练」：只出还没练过的（不带就出全部，可以重来一遍）
+      return startSession(t.getAttribute('data-only') === '1');
     }
     // 「练哪个单元」：**单选开关**（家长的原话："练哪个单元只是开关，单选。
     // 选完后的选项在'练哪一课'体现。"）。「综合」也走这一个入口 ——
@@ -3904,7 +3939,7 @@
       return render();
     }
     if (act === 'start') return startSession();
-    if (act === 'start-zuci') return startZuci();
+    if (act === 'start-zuci') return startZuci(t.getAttribute('data-only') === '1');
     if (act === 'start-poly') return startPoly();
     if (act === 'start-recite') return startRecite();
     if (act === 'start-due') return startDue();
