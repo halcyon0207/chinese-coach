@@ -125,12 +125,35 @@
   //
   // 根子是两件事被混在一起了：**练没练是孩子的事，批没批是家长的事**。
   // 所以这里把它们分开：写完就算练过（pending 也算），只是不进掌握度。
-  function pendingTodayKeys() {
+  // mode：只看某一个方向（"看拼音写词语" / "看词语写拼音"）。
+  // 首页那两行共用同一批字词，不分方向的话，只练了一个方向、另一行也显示
+  // "今天练过" —— 家长一眼就看出来了（"我记得拼音好像还没开始练啊"）。
+  function pendingTodayKeys(mode) {
     var start = todayStart(), out = {};
     (app.state.pending || []).forEach(function (p) {
       if ((p.ts || 0) < start) return;
       var it = p.item;
-      if (it && it.kind && it.text) out[keyOf(it)] = 1;
+      if (!it || !it.kind || !it.text) return;
+      if (mode && (it.mode || 'py2word') !== mode) return;
+      out[keyOf(it)] = 1;
+    });
+    return out;
+  }
+
+  // 某个方向上，每个条目最近一次练过是什么时候。
+  //
+  // 数据来自 history（它的每一条都记了 mode），而不是 stats ——
+  // stats 是按"字词"记掌握度的，不区分方向，这正是两行进度会串的原因。
+  //
+  // 老记录没有 mode 字段（那时候还没分方向），按"看拼音写词语"算：
+  // 那是默认方向、也是主方向。宁可少算，也不能把没练过的方向说成练过。
+  function modeActivity(mode) {
+    var out = {};
+    (app.state.history || []).forEach(function (h) {
+      if (!h || !h.key) return;
+      if ((h.mode || 'py2word') !== mode) return;
+      var ts = h.ts || 0;
+      if (!out[h.key] || ts > out[h.key]) out[h.key] = ts;
     });
     return out;
   }
@@ -141,14 +164,20 @@
   // 孩子可以根据日期标签自己主动判断是否想要重新练一次。"
   // 所以这里要的是一个**时刻**，不是"今天做过没有"这个布尔值 ——
   // 布尔值到了第二天就什么都不剩了。
-  function lastDoneAt(items) {
+  function lastDoneAt(items, mode) {
     var st = app.state.stats || {};
-    var pend = pendingTodayKeys();
+    var byMode = mode ? modeActivity(mode) : null;
+    var pend = pendingTodayKeys(mode);
     var latest = 0;
     (items || []).forEach(function (it) {
       var k = keyOf(it);
-      var r = st[k];
-      if (r && (r.lastAt || 0) > latest) latest = r.lastAt;
+      if (byMode) {
+        // 按方向问："这个字我用'看词语写拼音'练过吗" —— 没练过就是没练过
+        if ((byMode[k] || 0) > latest) latest = byMode[k];
+      } else {
+        var r = st[k];
+        if (r && (r.lastAt || 0) > latest) latest = r.lastAt;
+      }
       if (pend[k]) {
         var now = Date.now();
         if (now > latest) latest = now;
@@ -183,13 +212,17 @@
   // 家长会以为这一课练完了 —— 原来就是这么骗人的。
   // 为什么也不是"全部练完才算"：80 条字词一次根本练不完，
   // 那样这个标记永远不会亮，等于没有。
-  function progressOfItems(items) {
+  function progressOfItems(items, mode) {
     var list = items || [];
     var start = todayStart(), done = 0, today = 0;
-    var pend = pendingTodayKeys();
+    var byMode = mode ? modeActivity(mode) : null;
+    var pend = pendingTodayKeys(mode);
     list.forEach(function (it) {
-      var at = lastAtOf(it);
-      if (at === 0 && pend[keyOf(it)]) at = start;   // 写完还没批的，算今天练的
+      var k = keyOf(it);
+      // 传了 mode 就按方向算（"写字词"和"写拼音"共用同一批字词，必须分开）；
+      // 没传就用掌握度里的时刻（组词 / 多音字 / 默写这些只有一条路，不用分）
+      var at = byMode ? (byMode[k] || 0) : lastAtOf(it);
+      if (at === 0 && pend[k]) at = start;   // 写完还没批的，算今天练的
       if (at > 0) done++;
       if (at >= start) today++;
     });
@@ -201,7 +234,11 @@
   // 一行进度说明。今天动过就报今天的（对着"一轮"这个目标看），
   // 还没动就报累计的 —— 家长想知道"还剩多少"时用得上。
   function progressLine(p) {
-    if (p.today) return '今天 ' + p.today + '/' + p.goal + ' 条';
+    // 够了"一轮"就别再写成分数：43/10 读起来像"43 除以 10"，
+    // 家长只会以为哪儿算错了（原话："'今天43/10'这个表示什么意思？"）。
+    if (p.ok) return '今天练过 ' + p.today + ' 条';
+    // 没够一轮才写分数，并且点明分母是什么 —— 光一个 "1/10" 猜不出来
+    if (p.today) return '今天 ' + p.today + ' / 一轮 ' + p.goal + ' 条';
     if (p.done) return '已练 ' + p.done + '/' + p.total + ' 条';
     return '还没练过';
   }
@@ -1611,20 +1648,24 @@
       // 两个方向确实练的不是同一件事：一个是"听到音写出字"，一个是"看到字写出音"。
       // 进度两行共用同一批条目（同一个字练过就是练过，不必按方向分开记账），
       // 按钮各自带着自己的方向进去，省得进去还要先切换模式。
-      var pw = progressOfItems(items);
-      at = lastDoneAt(items);
+      var pw = progressOfItems(items, 'py2word');
+      at = lastDoneAt(items, 'py2word');
       add({
         no: no, title: '写字词 ' + items.length + ' 条',
         sub: '看拼音写词语 · ' + scopeTitle() + ' · ' + progressLine(pw),
-        btn: at ? '再练一次' : '开始写', act: 'start-mode',
+        btn: pw.ok ? '再练一次' : (at ? '继续练' : '开始写'), act: 'start-mode',
         extra: ' data-m="py2word"', when: fmtDoneAt(at), done: pw.ok
       });
       no++;
+      // 两行的算法完全一样，**只差方向** —— 所以进度必须各算各的：
+      // 共用一份的话，孩子只练了"写字词"，"写拼音"那行也会写着"今天练过"。
+      var pw2 = progressOfItems(items, 'word2py');
+      at = lastDoneAt(items, 'word2py');
       add({
         no: no, title: '写拼音 ' + items.length + ' 条',
-        sub: '看词语写拼音 · ' + scopeTitle() + ' · ' + progressLine(pw),
-        btn: at ? '再练一次' : '开始写', act: 'start-mode',
-        extra: ' data-m="word2py"', when: fmtDoneAt(at), done: pw.ok
+        sub: '看词语写拼音 · ' + scopeTitle() + ' · ' + progressLine(pw2),
+        btn: pw2.ok ? '再练一次' : (at ? '继续练' : '开始写'), act: 'start-mode',
+        extra: ' data-m="word2py"', when: fmtDoneAt(at), done: pw2.ok
       });
     }
     if (zuciItems.length) {
@@ -1634,8 +1675,8 @@
       add({
         no: no, title: '组词 ' + zuciItems.length + ' 条',
         sub: '给字组词，一行一个 · ' + progressLine(pz),
-        btn: at ? '再练一次' : '开始练', act: 'start-zuci', when: fmtDoneAt(at),
-        done: pz.ok
+        btn: pz.ok ? '再练一次' : (at ? '继续练' : '开始练'), act: 'start-zuci',
+        when: fmtDoneAt(at), done: pz.ok
       });
     }
     // 多音字 / 默写也一样走统一口径（原来它们数的是 history，
@@ -1647,8 +1688,8 @@
       add({
         no: no, title: '多音字选读音 ' + polyN + ' 题',
         sub: '当场判分，不用等家长批 · ' + progressLine(pp),
-        btn: at ? '再练一次' : '开始做', act: 'start-poly', when: fmtDoneAt(at),
-        done: pp.ok
+        btn: pp.ok ? '再练一次' : (at ? '继续练' : '开始做'), act: 'start-poly',
+        when: fmtDoneAt(at), done: pp.ok
       });
     }
     if (reciteN) {
@@ -1658,8 +1699,8 @@
       add({
         no: no, title: '默写 ' + reciteN + ' 句',
         sub: '日积月累 / 古诗，当场判分 · ' + progressLine(pr),
-        btn: at ? '再默一次' : '开始默写', act: 'start-recite', when: fmtDoneAt(at),
-        done: pr.ok
+        btn: pr.ok ? '再默一次' : (at ? '继续练' : '开始默写'), act: 'start-recite',
+        when: fmtDoneAt(at), done: pr.ok
       });
     }
 
@@ -3514,7 +3555,10 @@
       ts: Date.now(), key: k, text: item.text, py: item.py || '',
       isCorrect: !!isCorrect, note: note || '',
       unit: item.unit || app.state.unit || '',
-      mode: item.mode || '',
+      // 方向一定要记下来：首页"写字词"和"写拼音"是两行、用的是同一批字词，
+      // 靠这个字段分开算进度。不记的话，孩子只练了一个方向、另一行也显示
+      // "今天练过" —— 家长一眼就看出来了（"我记得拼音还没开始练啊"）。
+      mode: item.mode || app.state.mode || '',
       kind: item.kind || '',
       cells: item.cells || (item.text ? item.text.length : 0),
       perRow: item.perRow || 0
