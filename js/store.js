@@ -32,6 +32,12 @@
       // 没写完的那一轮：整份题目 + 做到第几题 + 当前题的笔迹。
       // 练习被打断是常态，下次进同一台设备要能接着写（见 app.js 的 saveDraft）。
       draft: null,
+      // 错题本里"在本子上写完、已经消掉"的那些：{ 'w:观潮': 消掉的时间 }。
+      //
+      // 为什么要记时间而不是只记"消掉了"：消掉之后**要是又写错了，这条得重新冒出来**。
+      // 只记一个布尔值的话，孩子这次写错了、家长还得手动去恢复它，谁都记不住。
+      // 判定见 app.js 的 mistakeItems：标记时间晚于最近一次写错 → 才算真消掉。
+      mistakeDone: {},
       // 正在进行的"这一批复习"：题目（ids）和顺序固定，已做的记在 done 里，
       // 2 小时内有效（见 app.js 的 DUE_WINDOW_MS）。
       // 存本机而不是放内存：点进去做一半退出、来回切几次，顺序和进度都得还在 ——
@@ -83,6 +89,7 @@
         feedback: arr(s.feedback, []),
         history: arr(s.history, []),
         draft: obj(s.draft, null),
+        mistakeDone: obj(s.mistakeDone, {}),
         dueRun: normalizeDueRun(s.dueRun),
         sync: obj(s.sync, { on: false, fam: '', dev: '', name: '', lastAt: 0 })
       };

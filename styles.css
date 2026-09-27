@@ -234,14 +234,30 @@ html, body {
 /* 错题本：照着拼音在本子上写的一张清单。
    故意不显示字本身 —— 孩子要是照着字抄，那就不是订正了。 */
 .card-mistake { border-left: 3px solid var(--warn); }
-.mk-row {
+
+/* 首页只留一行入口：二十多条全铺在首页上会把它变成"作业清单"，
+   而首页那张卡该回答的是"今天先干哪个"。 */
+.mk-entry { display: flex; align-items: center; gap: 10px; }
+.mk-entry-text { flex: 1; min-width: 0; }
+.mk-entry-text b { display: block; font-size: 15px; }
+.mk-entry-text i {
+  display: block;
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.mk-entry .btn { flex: none; }
+
+/* 错题本页面：全部列出来（不截断），写完整批划掉 */
+.mk-item {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 0;
+  padding: 9px 0;
   border-bottom: 1px solid var(--line);
 }
-.mk-row:last-of-type { border-bottom: none; }
+.mk-item:last-of-type { border-bottom: none; }
 .mk-no {
   flex: none;
   width: 20px;
@@ -253,19 +269,13 @@ html, body {
 .mk-main { flex: 1; min-width: 0; }
 .mk-py {
   display: block;
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: 2px;
   color: var(--text);
 }
-.mk-hint { font-size: 13.5px; color: var(--muted); margin-top: 2px; }
-.mk-sub {
-  flex: none;
-  font-size: 12px;
-  color: var(--muted);
-  padding-top: 4px;
-  text-align: right;
-}
+.mk-hint { display: block; font-style: normal; font-size: 14px; color: var(--muted); margin-top: 2px; }
+.mk-sub { display: block; font-style: normal; font-size: 12px; color: var(--muted); margin-top: 3px; }
 
 /* 看拼音写生字时的提示词：拼音下面一行小字。
    它只帮孩子确定"是哪个字"，不透露半个字形 —— 所以做得低调些，

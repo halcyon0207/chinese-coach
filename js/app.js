@@ -221,17 +221,29 @@
 
   // 按"课时"取题，不只按单元 —— 孩子得知道自己在练哪一课的字词。
   // lesson 传 'all' 就是整个单元。
-  function itemsForLesson(unitId, lesson) {
+  // 取要出题的单元列表。unitId 传 'all' 就是**全部单元一起** —— 跨单元的复习、
+  // 综合练习都靠它。为什么要有这条：错字不该因为"这一单元学完了"就不再考 ——
+  // 复习本来就是跨单元的事，考试更是。
+  //
+  // 每道题都带上自己所属的 unit（跨单元时不能再用传进来的那个），
+  // 否则复习排期、报告统计会全记到当前选中的单元名下。
+  function unitsOf(unitId) {
+    if (!unitId || unitId === 'all') return D.UNITS;
     var u = D.byId(unitId);
-    if (!u) return [];
+    return u ? [u] : [];
+  }
+
+  function itemsForLesson(unitId, lesson) {
     var out = [];
-    u.lessons.forEach(function (ln) {
-      if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
-      ln.words.forEach(function (w) {
-        out.push({ kind: 'w', text: w.w, py: w.p.join(' '), no: ln.no, unit: unitId, title: ln.title });
-      });
-      ln.chars.forEach(function (c) {
-        out.push({ kind: 'c', text: c.c, py: c.p, no: ln.no, unit: unitId, title: ln.title });
+    unitsOf(unitId).forEach(function (u) {
+      (u.lessons || []).forEach(function (ln) {
+        if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
+        (ln.words || []).forEach(function (w) {
+          out.push({ kind: 'w', text: w.w, py: w.p.join(' '), no: ln.no, unit: u.id, title: ln.title });
+        });
+        (ln.chars || []).forEach(function (c) {
+          out.push({ kind: 'c', text: c.c, py: c.p, no: ln.no, unit: u.id, title: ln.title });
+        });
       });
     });
     return out;
@@ -318,17 +330,17 @@
   var ZUCI_WORDS = 2;      // 每个字组 2 个词
   var ZUCI_PER_ROW = 4;    // 每个词一行、最多 4 格
   function itemsForZuci(unitId, lesson) {
-    var u = D.byId(unitId);
-    if (!u) return [];
     var out = [];
-    u.lessons.forEach(function (ln) {
-      if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
-      (ln.shizi || []).forEach(function (s) {
-        if (!s.zuci || !s.zuci.length) return;
-        out.push({
-          kind: 'z', text: s.c, py: s.p, zuci: s.zuci,
-          words: ZUCI_WORDS, perRow: ZUCI_PER_ROW, cells: ZUCI_WORDS * ZUCI_PER_ROW,
-          no: ln.no, unit: unitId, title: ln.title
+    unitsOf(unitId).forEach(function (u) {
+      (u.lessons || []).forEach(function (ln) {
+        if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
+        (ln.shizi || []).forEach(function (s) {
+          if (!s.zuci || !s.zuci.length) return;
+          out.push({
+            kind: 'z', text: s.c, py: s.p, zuci: s.zuci,
+            words: ZUCI_WORDS, perRow: ZUCI_PER_ROW, cells: ZUCI_WORDS * ZUCI_PER_ROW,
+            no: ln.no, unit: u.id, title: ln.title
+          });
         });
       });
     });
@@ -342,22 +354,22 @@
   // 出题方式：拿一个例子问"这个字在这里读什么"，选项就是这个字的全部读音。
   // 不用另外整理资料 —— 当初把它们录进来就是为了这一天。
   function itemsForPoly(unitId) {
-    var u = D.byId(unitId);
-    if (!u) return [];
     var out = [];
-    (u.polyphone || []).forEach(function (p) {
-      (p.readings || []).forEach(function (rd) {
-        var eg = String(rd.eg || '').split('、')[0].trim();
-        if (!eg) return;
-        out.push({
-          kind: 'p',
-          // text 要能唯一标识这道题：统计和复习排队都按 kind + text 记
-          text: p.char + '·' + eg,
-          char: p.char,
-          eg: eg,
-          py: rd.py,
-          unit: unitId,
-          options: (p.readings || []).map(function (x) { return x.py; })
+    unitsOf(unitId).forEach(function (u) {
+      (u.polyphone || []).forEach(function (p) {
+        (p.readings || []).forEach(function (rd) {
+          var eg = String(rd.eg || '').split('、')[0].trim();
+          if (!eg) return;
+          out.push({
+            kind: 'p',
+            // text 要能唯一标识这道题：统计和复习排队都按 kind + text 记
+            text: p.char + '·' + eg,
+            char: p.char,
+            eg: eg,
+            py: rd.py,
+            unit: u.id,
+            options: (p.readings || []).map(function (x) { return x.py; })
+          });
         });
       });
     });
@@ -372,21 +384,23 @@
   // 让默写字字都去手写，孩子一晚上就写不动了，反而练不到"背"。
   function itemsForRecite(unitId) {
     var out = [];
-    (R ? R.forUnit(unitId) : []).forEach(function (item) {
-      (item.lines || []).forEach(function (line, i) {
-        out.push({
-          kind: 'r',
-          text: line,
-          title: item.title,
-          // 带上单元：默写题也会混进跨单元的复习轮次里，没这一项就只好按"当前
-          // 选中的单元"记账 —— 报告里按单元统计会串到别的单元去。
-          unit: unitId,
-          py: '',
-          // 第一句没有"上一句"可给。原来这里塞的是标题，
-          // 孩子看到标题并不知道该从哪儿写起 —— 直接说明是开头。
-          hint: i > 0 ? item.lines[i - 1] : '',
-          idx: i + 1,
-          total: item.lines.length
+    unitsOf(unitId).forEach(function (u) {
+      (R ? R.forUnit(u.id) : []).forEach(function (item) {
+        (item.lines || []).forEach(function (line, i) {
+          out.push({
+            kind: 'r',
+            text: line,
+            title: item.title,
+            // 带上单元：默写题也会混进跨单元的复习轮次里，没这一项就只好按"当前
+            // 选中的单元"记账 —— 报告里按单元统计会串到别的单元去。
+            unit: u.id,
+            py: '',
+            // 第一句没有"上一句"可给。原来这里塞的是标题，
+            // 孩子看到标题并不知道该从哪儿写起 —— 直接说明是开头。
+            hint: i > 0 ? item.lines[i - 1] : '',
+            idx: i + 1,
+            total: item.lines.length
+          });
         });
       });
     });
@@ -1188,6 +1202,7 @@
 
   function scopeTitle() {
     var st = app.state;
+    if (!st.unit || st.unit === 'all') return '全部单元';
     var u = D.byId(st.unit);
     if (!u) return '';
     if (st.lesson === 'all') return u.name;
@@ -1584,49 +1599,90 @@
   function mistakeItems() {
     var latest = {}, wrongN = {};
     (app.state.history || []).forEach(function (h) {
-      var k = (h.kind || 'w') + ':' + (h.key || h.text);
+      // history 里的 key 已经是 keyOf(item) = "kind:文字"，直接用它 ——
+      // 别再拼一次前缀：那样拼出来是 "w:w:观潮"，和 stats 里的键对不上，
+      // 以后想让错题本和掌握度联动就会踩坑。老记录没有 key 时按 kind + text 补。
+      var k = h.key || ((h.kind || 'w') + ':' + (h.text || ''));
       if (!latest[k] || (h.ts || 0) >= latest[k].ts) latest[k] = h;
       if (!h.isCorrect) wrongN[k] = (wrongN[k] || 0) + 1;
     });
+    var done = app.state.mistakeDone || {};
     var out = [];
     Object.keys(latest).forEach(function (k) {
       var h = latest[k];
-      if (h.isCorrect) return;   // 最近一次是对的 —— 已经订正过了
+      var ts = h.ts || 0;
+      if (h.isCorrect) return;              // 最近一次是对的 —— 已经订正过了
+      // 在本子上写完、按了「写完了」也算消掉；
+      // 但**之后要是又写错了**（错的时间晚于消掉的时间），它得重新冒出来 ——
+      // 不然孩子这次白错，家长还不知道。
+      if ((done[k] || 0) >= ts) return;
       out.push({
         key: k, text: h.text || '', py: h.py || '', kind: h.kind || 'w',
-        ts: h.ts || 0, wrongN: wrongN[k] || 1
+        ts: ts, wrongN: wrongN[k] || 1
       });
     });
     out.sort(function (a, b) { return b.ts - a.ts; });   // 最近错的排前面
     return out;
   }
 
-  var MISTAKE_SHOW = 12;   // 首页最多列这么多 —— 太长孩子会把它当成作业清单而不是提示
+  // 首页只留一行入口 —— 二十多条全铺在首页上，它就成了"作业清单"，
+  // 而首页那张卡该回答的是"今天先干哪个"。要看全部、要销账，进错题本页面。
   function mistakeCard() {
     var list = mistakeItems();
     if (!list.length) return '';
-    var rows = list.slice(0, MISTAKE_SHOW).map(function (m, i) {
+    return '<div class="card card-mistake">' +
+      '<div class="mk-entry">' +
+      '<div class="mk-entry-text"><b>错题本（' + list.length + '）</b>' +
+      '<i>在本子上把每个字（词）写一行，写完点一下消掉</i></div>' +
+      '<button class="btn btn-soft" data-act="mistakes">打开</button>' +
+      '</div></div>';
+  }
+
+  // 错题本页面：**整批**一份清单，写完了整批划掉。
+  //
+  // 为什么不逐条勾：抄写是在本子上完成的，线上要留的只是一个凭据 ——
+  // "这一批是哪天写完的"。逐条勾会变成另一件要做的活（还得记着勾哪条），
+  // 而孩子真正的活是拿笔写。
+  function viewMistakes() {
+    var list = mistakeItems();
+    var rows = list.map(function (m, i) {
       var sub = (KIND_NAME[m.kind] || m.kind) + ' · 错 ' + m.wrongN + ' 次 · ' + esc(fmtDay(m.ts));
       var tip = '';
       if (m.kind === 'c') {
         var w = hintWordOf(m.text, null);
-        if (w) tip = '<div class="mk-hint">' + esc(hintText(w, m.text)) + '</div>';
+        if (w) tip = '<i class="mk-hint">' + esc(hintText(w, m.text)) + '</i>';
       }
-      return '<div class="mk-row">' +
+      return '<div class="mk-item">' +
         '<span class="mk-no">' + (i + 1) + '</span>' +
-        '<div class="mk-main"><span class="mk-py">' + esc(m.py) + '</span>' + tip + '</div>' +
-        '<span class="mk-sub">' + sub + '</span>' +
+        '<div class="mk-main"><b class="mk-py">' + esc(m.py) + '</b>' + tip +
+        '<i class="mk-sub">' + sub + '</i></div>' +
         '</div>';
-    });
-    var more = list.length > MISTAKE_SHOW
-      ? '<p class="card-note">还有 ' + (list.length - MISTAKE_SHOW) + ' 条 —— 先把上面的写掉。</p>'
-      : '';
-    return '<div class="card card-mistake">' +
-      '<h2 class="card-title">错题本（' + list.length + '）</h2>' +
-      '<p class="card-note">照着拼音，在本子上把每个字（词）写一行。' +
-      '写完之后在平板上把这个字再练对一次，它就从这里消失。</p>' +
-      rows.join('') + more +
-      '</div>';
+    }).join('');
+
+    // 上一批是什么时候写完的 —— 这就是"凭据"。
+    var doneAt = 0;
+    var dm = app.state.mistakeDone || {};
+    Object.keys(dm).forEach(function (k) { if ((dm[k] || 0) > doneAt) doneAt = dm[k]; });
+
+    return '' +
+      '<div class="topbar">' +
+      '<button class="btn-icon" data-act="home">←</button>' +
+      '<span class="topbar-title">错题本</span>' +
+      '<span class="topbar-right">' + list.length + ' 条</span></div>' +
+      '<div class="card">' +
+      (list.length
+        ? '<p class="card-note">照着拼音，在本子上把每个字（词）写一行。' +
+          '一份写完，点下面的按钮记一笔 —— 清单就清了，下次只剩新错的。' +
+          '要是又写错了，它会自己回来，不用记着谁还没写。</p>' +
+          rows +
+          '<button class="btn btn-primary btn-block" data-act="mistake-done-all">' +
+          '这一批都写完了（' + list.length + '）</button>'
+        : '<p class="card-note">这一批写完了。' +
+          (doneAt ? '（' + esc(fmtDay(doneAt)) + '）' : '') + '</p>') +
+      '</div>' +
+      (list.length && doneAt
+        ? '<p class="footnote">上次写完：' + esc(fmtDay(doneAt)) + '</p>'
+        : '');
   }
 
   // 原来的「今天该复习」单独占一张卡，现在并进了「今天要做的」清单里
@@ -1650,7 +1706,12 @@
 
     // 单元按钮上带**累计进度**：家长打开页面第一个想知道的就是
     // "哪些单元练完了、哪些还没动" —— 原来这个信息哪儿都没有。
-    var unitBtns = D.UNITS.map(function (u) {
+    // 「综合」排在最前面：跨单元出题。错字、学过的字词不该因为"这一单元学完了"
+    // 就不再考 —— 复习本来就是跨单元的事，考前更该这么练。
+    var unitBtns = '<button class="unit-btn' +
+      ((!unit || unit === 'all') ? ' on' : '') +
+      '" data-act="unit" data-u="all">综合</button>' +
+      D.UNITS.map(function (u) {
       var p = progressOfItems(itemsForLesson(u.id, 'all'));
       var mark = '';
       if (p.total) {
@@ -3486,7 +3547,8 @@
             : app.view === 'parent' ? viewParent()
               : app.view === 'ref' ? viewRef()
                 : app.view === 'mygrades' ? viewMyGrades()
-                  : viewHome();
+                  : app.view === 'mistakes' ? viewMistakes()
+                    : viewHome();
     root.innerHTML = '<div class="view view-' + app.view + '">' +
       (app.storageWarn ? '<div class="card card-warn">' + esc(app.storageWarn) + '</div>' : '') +
       // 同步相关的提示（比如"这条别人已经批过了"）放在最上面 ——
@@ -3580,6 +3642,22 @@
     if (act === 'lesson') {
       app.state.lesson = t.getAttribute('data-l') || 'all';
       saveState();
+      return render();
+    }
+    // 错题本：一份清单，写完**整批**划掉（见 viewMistakes 的说明）。
+    // 不做逐条勾选 —— 抄写是本子上完成的，线上留的只是一个"哪天写完的"凭据。
+    if (act === 'mistakes') {
+      app.view = 'mistakes';
+      app.message = '';
+      return render();
+    }
+    if (act === 'mistake-done-all') {
+      var mkList = mistakeItems();
+      app.state.mistakeDone = app.state.mistakeDone || {};
+      var mkNow = Date.now();
+      mkList.forEach(function (m) { app.state.mistakeDone[m.key] = mkNow; });
+      saveState();
+      app.message = '';
       return render();
     }
     // 「本周课堂」里点某一课：直接把单元和课时切过去，省得先找单元再找课
