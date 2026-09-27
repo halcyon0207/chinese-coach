@@ -57,12 +57,13 @@
   function arr(v, dflt) { return Array.isArray(v) ? v : dflt; }
   function str(v, dflt) { return typeof v === 'string' && v ? v : dflt; }
 
-  // 选中的单元：非空的字符串数组。空数组或形状不对就退回 [unit] ——
-  // 一个都不选的话就出不了题，那比"回到第一个单元"更糟。
+  // 选中的单元：字符串数组。**空数组是合法状态** —— 那是「综合」：
+  // 家长点了「综合」，接下来自己一个个点单元（点一个亮一个）。
+  // 所以不能再把空数组当成"形状不对"退回 [unit]，否则他一刷新，
+  // 刚点开的综合就自己跳回第一单元了。只有不是数组时才退回 [unit]。
   function unitList(v, dflt) {
     if (!Array.isArray(v)) return dflt;
-    var out = v.filter(function (k) { return typeof k === 'string' && k; });
-    return out.length ? out : dflt;
+    return v.filter(function (k) { return typeof k === 'string' && k; });
   }
 
   // 复习批次的形状要能放心用：ids 必须是非空的字符串数组，done / startedAt 也要对。

@@ -274,17 +274,28 @@
     return u ? [u] : [];
   }
 
-  // 现在选中的单元（可多选）。出题、复习、首页统计都走它。
-  //
-  // 为什么是数组而不是"全部 / 单个"两档开关：家长的原话是"点亮一、二单元就出
-  // 一二单元的题，点一二三就出这三个单元的" —— 范围是要自己挑的。
-  function selUnits() {
+  // 家长**自己点亮的**那几个单元（原始选择，可能是空的）。
+  // 空 = 他按了「综合」、还没挑具体是哪几个 —— 界面就照"都没亮"画。
+  function pickedUnits() {
     var list = app.state.units;
-    if (Array.isArray(list) && list.length) {
-      var ok = list.filter(function (id) { return !!D.byId(id); });
-      if (ok.length) return ok;
+    if (!Array.isArray(list) || !list.length) return [];
+    return list.filter(function (id) { return !!D.byId(id); });
+  }
+
+  // 现在生效的范围（出题、复习、首页统计都走它）。三种情况：
+  //   · 挑了单元            → 就是挑的那几个（可多选）
+  //   · 按了「综合」还没挑   → 全部单元（"综合"本来就是"跨单元"的意思）
+  //   · 旧存档只有单个 unit  → 那一个
+  //
+  // "空数组"和"根本没有 units 字段"是两件事，必须分开：前者是刚点了「综合」，
+  // 后者是还没有多选功能时的旧数据。混在一起的话，综合态一刷新就跳回第一单元。
+  function selUnits() {
+    var picked = pickedUnits();
+    if (picked.length) return picked;
+    if (Array.isArray(app.state.units)) {
+      return D.UNITS.map(function (x) { return x.id; });
     }
-    var u = D.byId(app.state.unit);   // 老数据里只有单个 unit
+    var u = D.byId(app.state.unit);
     return u ? [u.id] : [];
   }
 
@@ -1173,7 +1184,10 @@
     var st = app.state;
     // 多选时把选中的单元都报出来："第一单元、第二单元" ——
     // 不然孩子不知道这一轮到底在练哪些范围。
-    var ids = selUnits();
+    var ids = pickedUnits();
+    // 一个都没挑（刚点过「综合」）：别把八个单元名拼成一大串摆在这一行 ——
+    // 那行字要一眼看懂，"综合（全部单元）"就够了。
+    if (!ids.length) return '综合（全部单元）';
     if (ids.length > 1) {
       return ids.map(function (id) { return unitNameOf(id); }).join('、');
     }
@@ -1715,13 +1729,10 @@
     // 单元**可以多选**：点第一单元和第二单元，就出这两个单元混着的题。
     // 错字、学过的字词不该因为"这一单元学完了"就不再考 —— 复习本来就是跨单元的，
     // 考前更该这么练。点一下选中、再点一下取消（至少留一个，不然没题可出）。
-    var selIds = selUnits();
-    // 「综合」= 一键全选：错字和学过的字词不该因为"这一单元学完了"就不再考，
-    // 复习本来就是跨单元的，考前更要混着练。
-    // 它是个**快捷方式**，不是另一种模式 —— 点了之后各单元按钮照样亮着、照样能单独取消，
-    // 所以"选了哪几个单元"始终看得见（原来那个开关式的"综合"做不到这一点）。
-    var allIds = D.UNITS.map(function (x) { return x.id; });
-    var allOn = selIds.length >= allIds.length;
+    // 高亮用的是**原始选择**：空 = 刚点过「综合」、还没挑 ——
+    // 这时各单元按钮全灭，等他点一个亮一个（家长要的就是这个）。
+    var selIds = pickedUnits();
+    var allOn = !selIds.length;
     var unitBtns = '<button class="unit-btn' + (allOn ? ' on' : '') +
       '" data-act="unit-all">综合</button>' +
       D.UNITS.map(function (u) {
@@ -1784,7 +1795,11 @@
 
       '<div class="card">' +
       '<h2 class="card-title">练哪个单元</h2>' +
-      '<p class="card-note">可以选多个 —— 点亮哪几个，就混着出这几个单元的题（再点一下取消）。</p>' +
+      // 说明文字跟着走：点了「综合」之后要告诉家长"接下来该干什么"，
+      // 不然八个单元全灭着，他看着不知道是自己点坏了还是在等他挑。
+      '<p class="card-note">' + (allOn
+        ? '已打开「综合」—— 下面点哪几个单元，就出这几个单元的混合题（点一下选中、再点一下取消）。'
+        : '可以选多个 —— 点亮哪几个，就混着出这几个单元的题（再点一下取消）。') + '</p>' +
       '<div class="unit-row">' + unitBtns + '</div>' +
       '</div>' +
 
@@ -3650,12 +3665,15 @@
 
     if (typeof t.blur === 'function') t.blur();
 
-    // 「综合」：一键全选所有单元（再点一下退回只留第一个）——
-    // 同一个按钮管"全选 / 取消"，不然点错了还得一个个去取消。
+    // 「综合」：家长的原话是"点一下综合，出现一到八单元，然后我选一个就高亮一个，
+    // 代表选中这几个单元了"。所以它**不是"替我把八个都勾上"**（那样一点下去
+    // 后面全亮，他就不知道自己挑了哪些），而是"进入自己挑的状态"：
+    // 点了以后各单元按钮全灭，他逐个点、点一个亮一个。
+    // 一个都没挑时按**全部单元**算（"综合"本来就是跨单元的意思，这也正是
+    // 老版本那个"综合 = 练全部"的用法），所以不会出现"没范围、没题"的空档。
     if (act === 'unit-all') {
-      var every = D.UNITS.map(function (x) { return x.id; });
-      app.state.units = (selUnits().length >= every.length) ? [every[0]] : every;
-      app.state.unit = app.state.units[0];
+      app.state.units = [];
+      app.state.unit = D.UNITS[0].id;   // 报告页、识字表页仍按一个看
       app.state.lesson = 'all';
       saveState();
       return render();
@@ -3672,7 +3690,10 @@
     if (act === 'unit-toggle') {
       var tid = t.getAttribute('data-u');
       if (!D.byId(tid)) return render();
-      var cur = selUnits().slice();
+      // 取的是**原始选择**：刚点过「综合」时它是空的，于是这一次点击是"开始挑"
+      // （从这一个单元起算），而不是"在全部单元里去掉一个"——
+      // 后者正是"点一下综合，后面就全高亮"给人的错觉。
+      var cur = pickedUnits();
       var pos = cur.indexOf(tid);
       if (pos >= 0) {
         if (cur.length > 1) cur.splice(pos, 1);
