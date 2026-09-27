@@ -21,11 +21,12 @@
   function defaultState() {
     return {
       version: 1,
-      unit: 'U1',        // 当前练的单元（= 选中的第一个，报告页/识字表页仍按它看）
-      // 选中的单元可以不止一个：点亮第一、二单元就出这两个单元的题。
-      // 用一个数组而不是"全部/单个"两档开关 —— 范围是该自己挑的。
-      units: ['U1'],
-      lesson: 'all',     // 当前练的课时，'all' = 整个单元
+      unit: 'U1',        // 「练哪个单元」—— 单选：'all' = 综合，否则就是那一个单元
+      // 「综合」里挑过的那几个单元。空 = 还没挑 —— 出题时按全部单元算。
+      // 别和上面那个 unit 搞混：unit 管"练一个单元还是跨单元"，这个管
+      // "跨单元时要练哪几个"。（默认给空：一开始就是"还没挑"。）
+      units: [],
+      lesson: 'all',     // 「练哪一课」—— 'all' = 整个单元，或 '1'、'1,2'（可以多选）
       mode: 'py2word',   // 看拼音写词语 / 看词语写拼音。以前没存，重开页面就跳回默认
       passcode: '',      // 家长口令，空 = 还没设置
       stats: {},         // 'w:奇观' -> { attempts, corrects, wrongs, level, dueAt, lastAt, note }
@@ -93,7 +94,8 @@
       return {
         version: s.version || d.version,
         unit: str(s.unit, d.unit),
-        units: unitList(s.units, [str(s.unit, d.unit)]),
+        // 没有 units 字段（老存档）就给空数组 —— 空 = 「综合」里还没挑，按全部单元算
+        units: unitList(s.units, []),
         lesson: str(s.lesson, '') || 'all',
         mode: (s.mode === 'word2py') ? 'word2py' : 'py2word',
         passcode: str(s.passcode, ''),

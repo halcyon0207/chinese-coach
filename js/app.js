@@ -252,6 +252,47 @@
     return (md === 'py2word' && typeof rec.note === 'string') ? rec.note : '';
   }
 
+  /* ------------------------- 课时范围（可以多选） -------------------------
+   *
+   * 家长的原话："练哪一课可以单选也可以多选。"
+   * 所以这个范围可能不止一课：存法是 'all'（整个单元）或 '1,2'（第 1、2 课）。
+   *
+   * 为什么用逗号串、不用数组：它是会一路传下去的东西 —— 草稿、复习批次、
+   * 教案页、存档校验（store.js 里按"字符串"校验过一遍）。换成数组要同时放宽
+   * 六七处校验，而那些地方其实只问一件事："这一课在不在选的范围里"。
+   * 串只在这里拆、在这里拼，中间环节看见的仍然是一个字符串。
+   */
+  function lessonNos(lesson) {
+    var s = (lesson === undefined || lesson === null) ? '' : String(lesson);
+    if (!s || s === 'all') return null;   // null = 不限课（整个单元）
+    return s.split(',').filter(function (x) { return !!x; });
+  }
+
+  // 这一课在不在当前选的课时里
+  function lessonHit(no, lesson) {
+    var nos = lessonNos(lesson);
+    if (!nos) return true;
+    for (var i = 0; i < nos.length; i++) {
+      if (String(nos[i]) === String(no)) return true;
+    }
+    return false;
+  }
+
+  function lessonIsAll(lesson) { return !lessonNos(lesson); }
+
+  // 把选中的课号拼回串，并按课号在单元里的先后排好（'2,1' → '1,2'）。
+  // 排序不只是为了好看：复习批次是拿这个串判断"是不是同一批范围"的，
+  // 点的先后不同、串就不同，会被当成"换了范围"而白白作废一批。
+  function joinLesson(nos, unitId) {
+    if (!nos || !nos.length) return 'all';
+    var u = D.byId(unitId);
+    var order = u ? (u.lessons || []).map(function (l) { return String(l.no); }) : [];
+    var sorted = nos.slice().sort(function (a, b) {
+      return order.indexOf(String(a)) - order.indexOf(String(b));
+    });
+    return sorted.join(',');
+  }
+
   function lessonLabel(ln) {
     return ln.no ? ('第 ' + ln.no + ' 课') : '语文园地';
   }
@@ -274,36 +315,46 @@
     return u ? [u] : [];
   }
 
-  // 家长**自己点亮的**那几个单元（原始选择，可能是空的）。
-  // 空 = 他按了「综合」、还没挑具体是哪几个 —— 界面就照"都没亮"画。
+  /* ------------------- 两级范围：先选单元，再选课时或单元 -------------------
+   *
+   * 家长的原话："练哪个单元只是开关，单选。选完后的选项在'练哪一课'体现。
+   * 练哪一课可以单选也可以多选。"
+   *
+   * 所以这里是两级：
+   *   ① 「练哪个单元」—— 单选：综合 / 第一单元 / … / 第八单元
+   *   ② 「练哪一课」  —— 内容跟着①变，而且可以多选：
+   *        · ① 选了某个单元 → 列这个单元的课时（整个单元、第1课、第2课…）
+   *        · ① 选了「综合」 → 列八个单元（点哪几个就练这几个的混合题）
+   */
+  function unitPick() {
+    var u = app.state.unit;
+    if (u === 'all') return 'all';               // 综合
+    return D.byId(u) ? u : D.UNITS[0].id;
+  }
+
+  // ② 里挑的那几个单元（只在「综合」模式下用）。
+  // 一个都没挑 = 空 → 出题时按全部单元算（"综合"本来就是跨单元的意思）。
   function pickedUnits() {
     var list = app.state.units;
     if (!Array.isArray(list) || !list.length) return [];
     return list.filter(function (id) { return !!D.byId(id); });
   }
 
-  // 现在生效的范围（出题、复习、首页统计都走它）。三种情况：
-  //   · 挑了单元            → 就是挑的那几个（可多选）
-  //   · 按了「综合」还没挑   → 全部单元（"综合"本来就是"跨单元"的意思）
-  //   · 旧存档只有单个 unit  → 那一个
-  //
-  // "空数组"和"根本没有 units 字段"是两件事，必须分开：前者是刚点了「综合」，
-  // 后者是还没有多选功能时的旧数据。混在一起的话，综合态一刷新就跳回第一单元。
+  // 现在生效的单元集合（出题、复习、首页统计都走它）。
   function selUnits() {
+    var pick = unitPick();
+    if (pick !== 'all') return [pick];
     var picked = pickedUnits();
-    if (picked.length) return picked;
-    if (Array.isArray(app.state.units)) {
-      return D.UNITS.map(function (x) { return x.id; });
-    }
-    var u = D.byId(app.state.unit);
-    return u ? [u.id] : [];
+    return picked.length ? picked : D.UNITS.map(function (x) { return x.id; });
   }
 
   function itemsForLesson(unitId, lesson) {
     var out = [];
     unitsOf(unitId).forEach(function (u) {
       (u.lessons || []).forEach(function (ln) {
-        if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
+        // 课时可以多选，所以这里走 lessonHit（原来是一句相等比较，
+        // 范围一变多，"1,2" 跟哪个课号都不相等，会一条题都出不来）
+        if (!lessonHit(ln.no, lesson)) return;
         (ln.words || []).forEach(function (w) {
           out.push({ kind: 'w', text: w.w, py: w.p.join(' '), no: ln.no, unit: u.id, title: ln.title });
         });
@@ -399,7 +450,7 @@
     var out = [];
     unitsOf(unitId).forEach(function (u) {
       (u.lessons || []).forEach(function (ln) {
-        if (lesson !== 'all' && String(ln.no) !== String(lesson)) return;
+        if (!lessonHit(ln.no, lesson)) return;
         (ln.shizi || []).forEach(function (s) {
           if (!s.zuci || !s.zuci.length) return;
           out.push({
@@ -1181,24 +1232,27 @@
   }
 
   function scopeTitle() {
-    var st = app.state;
-    // 多选时把选中的单元都报出来："第一单元、第二单元" ——
-    // 不然孩子不知道这一轮到底在练哪些范围。
-    var ids = pickedUnits();
-    // 一个都没挑（刚点过「综合」）：别把八个单元名拼成一大串摆在这一行 ——
-    // 那行字要一眼看懂，"综合（全部单元）"就够了。
-    if (!ids.length) return '综合（全部单元）';
+    var ids = selUnits();
+    // 跨单元（综合）：把那几个单元报出来。全选时不必把八个名字拼成一长串 ——
+    // 这一行要一眼看懂，"全部单元"就够了。
     if (ids.length > 1) {
-      return ids.map(function (id) { return unitNameOf(id); }).join('、');
+      return ids.length >= D.UNITS.length
+        ? '综合（全部单元）'
+        : '综合：' + ids.map(function (id) { return unitNameOf(id); }).join('、');
     }
-    if (!st.unit || st.unit === 'all') return '全部单元';
-    var u = D.byId(st.unit);
+    var u = D.byId(ids[0]);
     if (!u) return '';
-    if (st.lesson === 'all') return u.name;
-    var hit = null;
-    u.lessons.forEach(function (l) { if (String(l.no) === String(st.lesson)) hit = l; });
-    if (!hit) return u.name;
-    return u.name.split('　')[0] + ' · ' + lessonLabel(hit) + '《' + hit.title + '》';
+    var nos = lessonNos(app.state.lesson);
+    if (!nos) return u.name;                     // 整个单元
+    // 课时可以多选，就把选中的几课都报出来（"第 1 课《观潮》 + 第 2 课《繁星》"）——
+    // 只报第一课的话，孩子会以为只练了那一课。
+    var names = nos.map(function (n) {
+      var hit = null;
+      u.lessons.forEach(function (l) { if (String(l.no) === String(n)) hit = l; });
+      return hit ? (lessonLabel(hit) + '《' + hit.title + '》') : '';
+    }).filter(Boolean);
+    if (!names.length) return u.name;
+    return u.name.split('　')[0] + ' · ' + names.join(' + ');
   }
 
   // 只有手写题才需要"订正"这一步：多音字和默写是程序当场判的，
@@ -1369,7 +1423,9 @@
     if (at >= d.session.length) return '';
     var it = d.session[at] || {};
     var kindName = KIND_NAME[String(it.kind || '')] || '练习';
-    var scope = [unitNameOf(d.unit), (d.lesson && d.lesson !== 'all') ? ('第 ' + d.lesson + ' 课') : '']
+    // 课时可能不止一个（存成 '1,2'）：直接拼会变成"第 1,2 课"，用顿号连起来读着顺
+    var dnos = lessonNos(d.lesson);
+    var scope = [unitNameOf(d.unit), dnos ? ('第 ' + dnos.join('、') + ' 课') : '']
       .filter(Boolean).join(' · ');
     return '<div class="card card-due">' +
       '<h2 class="card-title">上次还没写完</h2>' +
@@ -1453,7 +1509,9 @@
     var due = dueItems(unit, lesson);
     var progress = dueProgress();            // 有正在进行的批次时才有值
     var run0 = dueRun();
-    var staleDue = !!(run0 && run0.unit === unit &&
+    // 批次记的是 scope（范围 key），不是 unit —— 原来这里比的是 run0.unit，
+    // 那个字段压根不存在，于是"上一批过期了"永远判不出来。
+    var staleDue = !!(run0 && (run0.scope || run0.unit) === selUnits().join(',') &&
       (run0.lesson || 'all') === lesson && dueRunExpired(run0));
 
     var byKind = practicedTodayByKind();
@@ -1726,17 +1784,15 @@
 
     // 单元按钮上带**累计进度**：家长打开页面第一个想知道的就是
     // "哪些单元练完了、哪些还没动" —— 原来这个信息哪儿都没有。
-    // 单元**可以多选**：点第一单元和第二单元，就出这两个单元混着的题。
-    // 错字、学过的字词不该因为"这一单元学完了"就不再考 —— 复习本来就是跨单元的，
-    // 考前更该这么练。点一下选中、再点一下取消（至少留一个，不然没题可出）。
-    // 高亮用的是**原始选择**：空 = 刚点过「综合」、还没挑 ——
-    // 这时各单元按钮全灭，等他点一个亮一个（家长要的就是这个）。
-    var selIds = pickedUnits();
-    var allOn = !selIds.length;
-    var unitBtns = '<button class="unit-btn' + (allOn ? ' on' : '') +
-      '" data-act="unit-all">综合</button>' +
+    //
+    // 但「练哪个单元」本身是**单选开关**（家长的原话："练哪个单元只是开关，单选。
+    // 选完后的选项在'练哪一课'体现"）：点亮的永远是「综合」或某一个单元。
+    // 「综合」也不是"替你把八个都勾上" —— 它只是把范围交给下面去挑。
+    var pick = unitPick();
+    var unitBtns = '<button class="unit-btn' + (pick === 'all' ? ' on' : '') +
+      '" data-act="unit" data-u="all">综合</button>' +
       D.UNITS.map(function (u) {
-      var on = selIds.indexOf(u.id) >= 0;
+      var on = pick === u.id;
       var p = progressOfItems(itemsForLesson(u.id, 'all'));
       var mark = '';
       if (p.total) {
@@ -1745,16 +1801,30 @@
           : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
       }
       return '<button class="unit-btn' + (on ? ' on' : '') +
-        '" data-act="unit-toggle" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + mark + '</button>';
+        '" data-act="unit" data-u="' + esc(u.id) + '">' + esc(u.name.split('　')[0]) + mark + '</button>';
     }).join('');
 
-    var cur = D.byId(unit);
+    // 「练哪一课」是第二级，内容跟着上面变（家长要的就是这个）：
+    //   · 上面选了某个单元 → 这一单元的课时，而且**可以多选**
+    //   · 上面选了「综合」   → 八个单元（点哪几个就练这几个的混合题）
+    var cur = D.byId(pick === 'all' ? '' : pick);
     var lessonBtns = '';
-    if (cur) {
-      lessonBtns = '<button class="unit-btn' + (lesson === 'all' ? ' on' : '') +
+    if (pick === 'all') {
+      // 综合：这一块列八个单元。高亮看**挑过的**（pickedUnits），不是生效范围 ——
+      // 生效范围在"一个都没挑"时是全部，照它画就成了"一点综合后面全亮"，
+      // 那正是家长说错了的样子。
+      var mixIds = pickedUnits();
+      lessonBtns = D.UNITS.map(function (u) {
+        var on = mixIds.indexOf(u.id) >= 0;
+        return '<button class="unit-btn' + (on ? ' on' : '') +
+          '" data-act="mix-unit" data-u="' + esc(u.id) + '">' +
+          esc(u.name.split('　')[0]) + '</button>';
+      }).join('');
+    } else if (cur) {
+      lessonBtns = '<button class="unit-btn' + (lessonIsAll(lesson) ? ' on' : '') +
         '" data-act="lesson" data-l="all">整个单元</button>' +
         cur.lessons.map(function (ln) {
-          var items = itemsForLesson(unit, ln.no);
+          var items = itemsForLesson(pick, ln.no);
           var n = items.length;
           var label = lessonLabel(ln) + '《' + ln.title + '》';
           if (!n) {
@@ -1767,7 +1837,8 @@
           var mark = p.done >= p.total
             ? '<span class="when done">✓</span>'
             : (p.done ? '<span class="when">' + p.done + '/' + p.total + '</span>' : '');
-          return '<button class="unit-btn' + (String(lesson) === String(ln.no) ? ' on' : '') +
+          // 课时可以多选，所以高亮跟着走（lessonHit 认 '1,2' 这种多选范围）
+          return '<button class="unit-btn' + (lessonHit(ln.no, lesson) ? ' on' : '') +
             '" data-act="lesson" data-l="' + esc(ln.no) + '">' +
             esc(label) + '（' + n + '）' + mark +
             '</button>';
@@ -1797,15 +1868,15 @@
       '<h2 class="card-title">练哪个单元</h2>' +
       // 说明文字跟着走：点了「综合」之后要告诉家长"接下来该干什么"，
       // 不然八个单元全灭着，他看着不知道是自己点坏了还是在等他挑。
-      '<p class="card-note">' + (allOn
-        ? '已打开「综合」—— 下面点哪几个单元，就出这几个单元的混合题（点一下选中、再点一下取消）。'
-        : '可以选多个 —— 点亮哪几个，就混着出这几个单元的题（再点一下取消）。') + '</p>' +
+      '<p class="card-note">点亮要练的那个单元 —— 一次一个。要跨单元就点「综合」，再到下面挑。</p>' +
       '<div class="unit-row">' + unitBtns + '</div>' +
       '</div>' +
 
       '<div class="card">' +
       '<h2 class="card-title">练哪一课</h2>' +
-      '<p class="card-note">跟课堂进度走，学到哪一课就练哪一课。</p>' +
+      '<p class="card-note">' + (pick === 'all'
+        ? '「综合」要练的几个单元在这里点（点一下选中、再点一下取消；一个都不点就是全部单元）。'
+        : '跟课堂进度走，学到哪一课就练哪一课。可以点好几课一起练；点「整个单元」就是整单元。') + '</p>' +
       '<div class="unit-row">' + lessonBtns + '</div>' +
       '</div>' +
 
@@ -2225,13 +2296,14 @@
     // 教案里的写字指导比"易错字：鼎（12 画）"具体得多：
     // 会写明结构、笔顺、哪一笔容易写错，家长辅导时照着说就行。
     function writingTipsSection() {
-      var scope = app.state.lesson;
-      var ids = (scope === 'all' ? u.lessons.map(function (l) { return l.no; }) : [scope]);
+      // 课时可以多选，所以要按"选中的每一课"取 —— 原来把整个值当成一个课号，
+      // '1,2' 去查教案一条都查不到
+      var ids = lessonNos(app.state.lesson) || u.lessons.map(function (l) { return l.no; });
       var tips = [];
       ids.forEach(function (n) { tips = tips.concat(jiaoanTipsOf(u.id, n)); });
       if (!tips.length) {
         return '<p class="card-note">' +
-          (scope === 'all' ? '本单元教案里没有逐字的书写指导。' : '这一课的教案里没有逐字的书写指导。') +
+          (lessonIsAll(app.state.lesson) ? '本单元教案里没有逐字的书写指导。' : '这一课的教案里没有逐字的书写指导。') +
           '</p>';
       }
       return tips.map(function (t) {
@@ -2247,7 +2319,7 @@
       if (!ju) return '';
       var scope = app.state.lesson;
 
-      if (scope === 'all') {
+      if (lessonIsAll(scope)) {
         return '<div class="card"><h2 class="card-title">单元要点（教案）</h2>' +
           '<p class="card-note">本单元的教学目标与重难点，知道这一单元要抓什么。</p>' +
           listBlock('教学目标', ju.goals) +
@@ -2256,7 +2328,8 @@
           '</div>';
       }
 
-      var ls = jiaoanLessons(u.id, scope);
+      var ls = [];
+      (lessonNos(scope) || []).forEach(function (n) { ls = ls.concat(jiaoanLessons(u.id, n)); });
       if (!ls.length) return '';
       var keys = [], hards = [], hw = [], board = [];
       ls.forEach(function (l) {
@@ -2270,8 +2343,10 @@
       var goalBlocks = ls.map(function (l) {
         return listBlock(ls.length > 1 ? (l.period || '教学目标') : '教学目标', l.goals || []);
       }).join('');
+      // 标题上那门课的名字：多选时取选中的第一课 —— 下面已经写了"共 N 节课时"，
+      // 把几课的名字都堆进标题反而看不清
       var ln = null;
-      u.lessons.forEach(function (x) { if (String(x.no) === String(scope)) ln = x; });
+      u.lessons.forEach(function (x) { if (!ln && lessonHit(x.no, scope)) ln = x; });
 
       return '<div class="card"><h2 class="card-title">本课重点（教案）' +
         (ln ? '　' + esc(lessonLabel(ln) + '《' + ln.title + '》') : '') + '</h2>' +
@@ -3665,16 +3740,18 @@
 
     if (typeof t.blur === 'function') t.blur();
 
-    // 「综合」：家长的原话是"点一下综合，出现一到八单元，然后我选一个就高亮一个，
-    // 代表选中这几个单元了"。所以它**不是"替我把八个都勾上"**（那样一点下去
-    // 后面全亮，他就不知道自己挑了哪些），而是"进入自己挑的状态"：
-    // 点了以后各单元按钮全灭，他逐个点、点一个亮一个。
-    // 一个都没挑时按**全部单元**算（"综合"本来就是跨单元的意思，这也正是
-    // 老版本那个"综合 = 练全部"的用法），所以不会出现"没范围、没题"的空档。
-    if (act === 'unit-all') {
-      app.state.units = [];
-      app.state.unit = D.UNITS[0].id;   // 报告页、识字表页仍按一个看
-      app.state.lesson = 'all';
+    // 「综合」里挑单元（第二级「练哪一课」那排按钮）：点一个加一个、再点取消。
+    // 家长的原话："点了综合以后，就在练哪一课里点需要综合的几个单元就行。"
+    // 一个都不挑 = 按全部单元算，不会出现"没范围、没题"的空档。
+    if (act === 'mix-unit') {
+      var mid = t.getAttribute('data-u');
+      if (!D.byId(mid)) return render();
+      var mix = pickedUnits();
+      var mpos = mix.indexOf(mid);
+      if (mpos >= 0) mix.splice(mpos, 1); else mix.push(mid);
+      var morder = D.UNITS.map(function (x) { return x.id; });
+      mix.sort(function (a, b) { return morder.indexOf(a) - morder.indexOf(b); });
+      app.state.units = mix;
       saveState();
       return render();
     }
@@ -3685,42 +3762,34 @@
       saveState();
       return startSession();
     }
-    // 单元**多选**（首页）：点一下选中、再点一下取消，至少留一个 ——
-    // 一个都不选就没题可出了。
-    if (act === 'unit-toggle') {
-      var tid = t.getAttribute('data-u');
-      if (!D.byId(tid)) return render();
-      // 取的是**原始选择**：刚点过「综合」时它是空的，于是这一次点击是"开始挑"
-      // （从这一个单元起算），而不是"在全部单元里去掉一个"——
-      // 后者正是"点一下综合，后面就全高亮"给人的错觉。
-      var cur = pickedUnits();
-      var pos = cur.indexOf(tid);
-      if (pos >= 0) {
-        if (cur.length > 1) cur.splice(pos, 1);
-      } else {
-        cur.push(tid);
-      }
-      // 按单元顺序排好："第一、二单元"读着顺，不然会出现"第三、一单元"
-      var order = D.UNITS.map(function (x) { return x.id; });
-      cur.sort(function (a, b) { return order.indexOf(a) - order.indexOf(b); });
-      app.state.units = cur;
-      app.state.unit = cur[0];      // 报告页、识字表页仍按第一个看
-      app.state.lesson = 'all';     // 范围变了，课时退回"整个单元"
-      saveState();
-      return render();
-    }
+    // 「练哪个单元」：**单选开关**（家长的原话："练哪个单元只是开关，单选。
+    // 选完后的选项在'练哪一课'体现。"）。「综合」也走这一个入口 ——
+    // 它只是把"具体练哪几个单元"交给下面第二级去挑。
     if (act === 'unit') {
       var nu = t.getAttribute('data-u') || 'U1';
+      if (nu !== 'all' && !D.byId(nu)) return render();
       // 换单元就把课时退回"整个单元"，否则会停在上一单元那个课次上，题是空的
       if (nu !== app.state.unit) app.state.lesson = 'all';
       app.state.unit = nu;
-      // 单选（识字表组词页那边）：把多选也收成这一个，两处别各说各的
-      app.state.units = [nu];
+      // units 那个数组现在只表示「综合」里挑过哪几个单元，单选时用不着，所以别动它 ——
+      // 这样从综合切出去再切回来，上次挑的那几个还在。
       saveState();
       return render();
     }
+    // 「练哪一课」：可以点好几课（家长的原话："练哪一课可以单选也可以多选"）。
+    // 「整个单元」和具体课时**互斥**（这条也是家长定的）：点「整个单元」就是整单元
+    // （具体课自动取消）；点某一课就变成"只练这几课"；把最后一课也取消，
+    // 自动回到"整个单元" —— 不会出现"什么都没选"。
     if (act === 'lesson') {
-      app.state.lesson = t.getAttribute('data-l') || 'all';
+      var lno = t.getAttribute('data-l') || 'all';
+      if (lno === 'all') {
+        app.state.lesson = 'all';
+      } else {
+        var nos = lessonNos(app.state.lesson) || [];
+        var at = nos.indexOf(String(lno));
+        if (at >= 0) nos.splice(at, 1); else nos.push(String(lno));
+        app.state.lesson = joinLesson(nos, app.state.unit);
+      }
       saveState();
       return render();
     }
