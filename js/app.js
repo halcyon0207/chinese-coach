@@ -22,6 +22,9 @@
   var D = window.ChineseData;
   var R = window.ReciteData;
   var J = window.JiaoanData || null;   // 教案数据，没有也能跑（只是少了"课堂进度"这些）
+  // 提示词补充表（教材词语表没收录的那些字，见 js/hints.js）。没有这个文件也能跑，
+  // 只是那几十个字会退回"只给拼音"。
+  var HINTS = (window.ChineseHints && window.ChineseHints.HINTS) || {};
   var S = window.Store;
   // 跨设备同步。没引 cloud.js 时这里是 null，所有同步调用都跳过，项目照常跑。
   var F = (typeof window !== 'undefined' && window.FamilySync) ? window.FamilySync : null;
@@ -219,6 +222,59 @@
       });
     });
     return out;
+  }
+
+  /* ---------------------- 看拼音写生字：给一个提示词 ----------------------
+   *
+   * 只看一个拼音写单字，天生是"一音多字"：`jù` 可以是 句、巨、具、俱、剧、聚、据……
+   * 孩子不是不会写，是不知道该写哪个，只能猜 —— 猜错还被记成"这个字没掌握"，
+   * 掌握度、复习排期全跟着虚。
+   *
+   * 所以给一个词，把"是哪个字"定住。给的是**词**，不是字形：
+   * 偏旁、结构、笔画一个字都不说，同音字对比也不说。
+   * 写字课的难点本来就在"音 → 形"那一段，提示不碰那一段，所以它不降低难度，
+   * 只是把"一音多字"这个和写字无关的干扰去掉。
+   *
+   * 词的来源，按孩子认识它的可能性排：
+   *   同课词语表（刚学过，看到就认得）→ 别的课词语表 → js/hints.js 里手补的常用词。
+   * 词长限 2～4 字：再长就成句子了（读题比写字还累），再短撇不开同音。
+   * 实在没有合适的词（曰、哩、啦 这类语气词/文言用字）就只给拼音。
+   */
+  var hintIndex = null;
+  function buildHintIndex() {
+    var idx = {};
+    function add(w, no) {
+      if (typeof w !== 'string' || w.length < 2 || w.length > 4) return;
+      for (var i = 0; i < w.length; i++) {
+        var ch = w.charAt(i);
+        (idx[ch] = idx[ch] || []).push({ w: w, no: no });
+      }
+    }
+    D.UNITS.forEach(function (u) {
+      (u.lessons || []).forEach(function (ln) {
+        (ln.words || []).forEach(function (x) { add(x.w, ln.no); });
+        (ln.shizi || []).forEach(function (s) {
+          (s.zuci || []).forEach(function (z) { add(z, ln.no); });
+        });
+      });
+    });
+    return idx;
+  }
+
+  function hintWordOf(ch, lessonNo) {
+    if (!hintIndex) hintIndex = buildHintIndex();
+    var list = hintIndex[ch] || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].no) === String(lessonNo)) return list[i].w;
+    }
+    if (list.length) return list[0].w;
+    return HINTS[ch] || '';
+  }
+
+  // 把词里要写的那个字挖空："寂静" → "（　）静"
+  function hintText(word, ch) {
+    if (!word) return '';
+    return word.split('').map(function (c) { return c === ch ? '（　）' : c; }).join('');
   }
 
   // 组词训练：只从二类字（识字表）出题。
@@ -1738,11 +1794,18 @@
     var pendingCount = (app.state.pending || []).length;
     var lastAt = lastAtOf(it);
     var stemLabel = isZ ? '给字组词' : (isPy ? '看拼音写' : '看词语写拼音');
+    // 看拼音写生字：拼音下面再给一个挖空词，把"是哪个字"定住（见 hintWordOf 的说明）。
+    // 只在"看拼音写"这一向给 —— 反过来的"看词语写拼音"，字就摆在眼前，用不着提示。
+    var hintWord = (it.kind === 'c' && isPy) ? hintWordOf(it.text, it.no) : '';
     var stemBody = isZ
       ? '<span class="zuci-char">' + esc(it.text) + '</span>' +
         '<span class="zuci-py">' + esc(it.py) + '</span>' +
         '<span class="zuci-tip">给它组 ' + it.words + ' 个词</span>'
-      : (isPy ? esc(it.py) : esc(it.text));
+      : (isPy
+        ? esc(it.py) + (hintWord
+          ? '<span class="hint-word">' + esc(hintText(hintWord, it.text)) + '</span>'
+          : '')
+        : esc(it.text));
     var hint = isZ
       ? ('一行写一个词，共 ' + it.words + ' 个词（每个词 2～4 个字都行，写不满空着即可）')
       : (isPy ? ('共 ' + n + ' 个字') : ('共 ' + n + ' 个音节，一个音节占一格'));
@@ -3747,6 +3810,10 @@
       app: app,
       cellLayout: cellLayout,
       pointXY: pointXY,
+      // 看拼音写生字的提示词：这道题给不给得出提示、给的对不对，
+      // 直接决定孩子是不是在"猜字"—— 值得让测试盯住
+      hintWordOf: hintWordOf,
+      hintText: hintText,
       gradingQueue: gradingQueue,
       applyRemoteGrades: applyRemoteGrades,
       reportSnapshot: reportSnapshot

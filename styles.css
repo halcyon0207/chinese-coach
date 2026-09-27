@@ -219,6 +219,17 @@ html, body {
 }
 .today-done { flex: none; font-size: 12.5px; font-weight: 700; color: var(--ok); }
 .today-row .btn { flex: none; }
+/* 看拼音写生字时的提示词：拼音下面一行小字。
+   它只帮孩子确定"是哪个字"，不透露半个字形 —— 所以做得低调些，
+   让注意力仍然落在拼音上，别一上来就被词带着走。 */
+.hint-word {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  color: var(--muted);
+  letter-spacing: 3px;
+}
+
 /* 复习轮挂在题目上方的那一条：这一批做到哪儿了、还剩多久 */
 .due-pill {
   margin: 0 0 10px;
