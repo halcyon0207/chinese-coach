@@ -205,13 +205,16 @@
   //
   // done   —— 累计练过多少条（有记录就算，不管哪天）
   // today  —— 今天练过多少条（含"写完还在等家长批的"）
-  // goal   —— 今天做多少条才算"今天练过这一项"
+  // total  —— 这一摊一共多少条
+  // ok     —— 练完了没有
   //
-  // 门槛取"一轮的量"（SESSION_SIZE）和"这一摊总数"里小的那个。
-  // 为什么不是"练过一条就算"：孩子只写了一个字，首页就写"今天做过"，
-  // 家长会以为这一课练完了 —— 原来就是这么骗人的。
-  // 为什么也不是"全部练完才算"：80 条字词一次根本练不完，
-  // 那样这个标记永远不会亮，等于没有。
+  // ok 的标准是**这一摊的真实条数全练过**（家长定的口径）：
+  // "不要有每天10条这样的死规矩……语文就以每课的真实字词为准，
+  //  作为练习完成的标准。"
+  // 原来卡的"每天一轮 10 条就算今天做完"，后果家长一眼就看出来了：
+  // 80 条只练了 43 条，那一行已经打了勾、连按钮都没有了。
+  // 也不取"练过一条就算"：孩子只写了一个字首页就写"今天做过"，
+  // 家长会以为这一课练完了。
   function progressOfItems(items, mode) {
     var list = items || [];
     var start = todayStart(), done = 0, today = 0;
@@ -227,19 +230,19 @@
       if (at >= start) today++;
     });
     var total = list.length;
-    var goal = Math.min(SESSION_SIZE, total || SESSION_SIZE);
-    return { done: done, today: today, total: total, goal: goal, ok: today >= goal };
+    // ok 看的是**累计**练过多少（done），不是今天练了多少 ——
+    // 80 条分几天练完也算练完，不会因为"今天没练够"又打回未完成。
+    return { done: done, today: today, total: total, goal: total, ok: total > 0 && done >= total };
   }
 
   // 一行进度说明。今天动过就报今天的（对着"一轮"这个目标看），
   // 还没动就报累计的 —— 家长想知道"还剩多少"时用得上。
   function progressLine(p) {
-    // 够了"一轮"就别再写成分数：43/10 读起来像"43 除以 10"，
-    // 家长只会以为哪儿算错了（原话："'今天43/10'这个表示什么意思？"）。
-    if (p.ok) return '今天练过 ' + p.today + ' 条';
-    // 没够一轮才写分数，并且点明分母是什么 —— 光一个 "1/10" 猜不出来
-    if (p.today) return '今天 ' + p.today + ' / 一轮 ' + p.goal + ' 条';
-    if (p.done) return '已练 ' + p.done + '/' + p.total + ' 条';
+    // 直接报"已练多少 / 一共多少" —— 这就是家长要的完成标准，
+    // 还剩多少一眼看得出来（原来那个 "43/10" 既看不出还剩多少，
+    // 还读着像"43 除以 10"）。
+    if (p.ok) return '全部练完（' + p.total + ' 条）';
+    if (p.done) return '已练 ' + p.done + ' / ' + p.total + ' 条';
     return '还没练过';
   }
 
@@ -3517,7 +3520,14 @@
   // 家长批改（手写题）和程序自动判分（多音字 / 默写）走的是同一套，
   // 复习节奏才不会出现两套标准 —— 否则"错一次"在两种题型里含义不同，
   // 到期排队就乱了。
-  function recordResult(item, isCorrect, note, strokes) {
+  // wroteAt：**孩子写的那一刻**（手写题要等家长批改，批改可能在几天之后）。
+  // 不传就退回"现在" —— 多音字 / 默写是当堂判分的，做完就落地，没有这个问题。
+  //
+  // 为什么必须传：原来这两处时刻用的都是批改时刻，于是家长晚上批一批，
+  // 首页上"写字词"那行的时间戳就跳成今晚 —— 家长看到的怪事正是
+  // "15:14 我只练了拼音，写字词那行怎么也写着 15:14"。
+  function recordResult(item, isCorrect, note, strokes, wroteAt) {
+    var at = wroteAt || Date.now();
     var k = keyOf(item);
     var r = app.state.stats[k] || { attempts: 0, corrects: 0, wrongs: 0, level: 0 };
 
@@ -3534,7 +3544,7 @@
       // 纠正的成本比当时改高得多。
       r.dueAt = Date.now();
     }
-    r.lastAt = Date.now();
+    r.lastAt = at;   // "最后练过"是**孩子写的时候**，不是家长批的时候
     if (note) {
       // 批注按题型分开存：写字题的批注不会跑到拼音题上去（读的时候见 noteForMode）。
       // 用 item.mode（写的那一刻钉在题上的）而不是当前模式 ——
@@ -3552,7 +3562,7 @@
     // 存下原始笔迹：报告里要能回放"当时写的是什么"，光看汉字和拼音
     // 想不起错在哪一笔。多音字 / 默写没有笔迹，strokes 为空就不存。
     var rec = {
-      ts: Date.now(), key: k, text: item.text, py: item.py || '',
+      ts: at, key: k, text: item.text, py: item.py || '',
       isCorrect: !!isCorrect, note: note || '',
       unit: item.unit || app.state.unit || '',
       // 方向一定要记下来：首页"写字词"和"写拼音"是两行、用的是同一批字词，
@@ -3608,7 +3618,8 @@
   // 本地批和"家长在别的设备上批完传回来"走的是同一条路 —— 规则分叉就会出现
   // "错一次"在两种题型/两种来源里含义不同，复习排期立刻乱掉。
   function applyResult(p, isCorrect, note) {
-    recordResult(p.item, isCorrect, note, p.strokes);
+    // p.ts 是孩子交上来的时刻（家长可能几天后才批）—— 见 recordResult 的说明
+    recordResult(p.item, isCorrect, note, p.strokes, p.ts);
 
     // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
     // 家长那句批注也就失去了上下文。带上笔迹，孩子能对照着看自己哪里写错了。
