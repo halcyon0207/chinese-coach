@@ -25,6 +25,8 @@
   // 提示词补充表（教材词语表没收录的那些字，见 js/hints.js）。没有这个文件也能跑，
   // 只是那几十个字会退回"只给拼音"。
   var HINTS = (window.ChineseHints && window.ChineseHints.HINTS) || {};
+  // 说明型提示：连词都组不出来的字（哩、啦），给"它是哪一类词"。见 js/hints.js 的 NOTES。
+  var HNOTES = (window.ChineseHints && window.ChineseHints.NOTES) || {};
   var S = window.Store;
   // 跨设备同步。没引 cloud.js 时这里是 null，所有同步调用都跳过，项目照常跑。
   var F = (typeof window !== 'undefined' && window.FamilySync) ? window.FamilySync : null;
@@ -275,6 +277,17 @@
   function hintText(word, ch) {
     if (!word) return '';
     return word.split('').map(function (c) { return c === ch ? '（　）' : c; }).join('');
+  }
+
+  // 这道题到底给什么提示。两种，优先给词：
+  //   · word —— 词（"寂静"），是本字在教材词语表里出现过的搭配；
+  //              顺带还复习了这个词的写法，所以能用词就用词。
+  //   · note —— 说明（"语气词，用在句子末尾"）。只有连词都组不出来的字才用它。
+  // 两种都不透露字形；共同目的是让孩子知道"该写哪个字"，而不是猜。
+  function hintOf(ch, lessonNo) {
+    var w = hintWordOf(ch, lessonNo);
+    if (w) return { word: w, note: '' };
+    return { word: '', note: HNOTES[ch] || '' };
   }
 
   // 组词训练：只从二类字（识字表）出题。
@@ -1794,17 +1807,18 @@
     var pendingCount = (app.state.pending || []).length;
     var lastAt = lastAtOf(it);
     var stemLabel = isZ ? '给字组词' : (isPy ? '看拼音写' : '看词语写拼音');
-    // 看拼音写生字：拼音下面再给一个挖空词，把"是哪个字"定住（见 hintWordOf 的说明）。
+    // 看拼音写生字：拼音下面再给一个提示，把"是哪个字"定住（见 hintOf 的说明）。
     // 只在"看拼音写"这一向给 —— 反过来的"看词语写拼音"，字就摆在眼前，用不着提示。
-    var hintWord = (it.kind === 'c' && isPy) ? hintWordOf(it.text, it.no) : '';
+    var hint = (it.kind === 'c' && isPy) ? hintOf(it.text, it.no) : { word: '', note: '' };
+    var hintHtml = hint.word
+      ? esc(hintText(hint.word, it.text))
+      : (hint.note ? '（' + esc(hint.note) + '）' : '');
     var stemBody = isZ
       ? '<span class="zuci-char">' + esc(it.text) + '</span>' +
         '<span class="zuci-py">' + esc(it.py) + '</span>' +
         '<span class="zuci-tip">给它组 ' + it.words + ' 个词</span>'
       : (isPy
-        ? esc(it.py) + (hintWord
-          ? '<span class="hint-word">' + esc(hintText(hintWord, it.text)) + '</span>'
-          : '')
+        ? esc(it.py) + (hintHtml ? '<span class="hint-word">' + hintHtml + '</span>' : '')
         : esc(it.text));
     var hint = isZ
       ? ('一行写一个词，共 ' + it.words + ' 个词（每个词 2～4 个字都行，写不满空着即可）')
@@ -3813,6 +3827,7 @@
       // 看拼音写生字的提示词：这道题给不给得出提示、给的对不对，
       // 直接决定孩子是不是在"猜字"—— 值得让测试盯住
       hintWordOf: hintWordOf,
+      hintOf: hintOf,
       hintText: hintText,
       gradingQueue: gradingQueue,
       applyRemoteGrades: applyRemoteGrades,
