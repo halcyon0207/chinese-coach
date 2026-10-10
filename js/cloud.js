@@ -632,6 +632,23 @@
     return post({ action: 'report.pull', fam: s.fam }).then(function (d) { return d.reports || []; });
   }
 
+  /* ------------------------------ 留言流（家长端写，孩子端读） ------------------------------ */
+
+  // 家长给孩子捎一句话。孩子在首页能看到，点「知道了」后就不再显示（已读记在孩子本机）。
+  // 不做已读回执（少一次写）：云端留言 7 天自动过期、最多留 5 条，重装最多把最近几条再看一遍。
+  function pushNote(text) {
+    if (!on()) return Promise.reject(new Error('没开同步'));
+    var s = sync();
+    return post({ action: 'note.push', fam: s.fam, dev: s.dev, text: String(text || '').slice(0, 200) });
+  }
+
+  // 孩子端拉留言。新的在前。进首页时看一眼就够，不做轮询。
+  function pullNotes() {
+    if (!on()) return Promise.resolve([]);
+    var s = sync();
+    return post({ action: 'note.pull', fam: s.fam }).then(function (d) { return d.notes || []; });
+  }
+
   /* ------------------------------ 清空 ------------------------------ */
 
   function clearDevice() {
@@ -712,6 +729,8 @@
     pullWork: pullWork,
     pushReport: pushReport,
     pullReports: pullReports,
+    pushNote: pushNote,
+    pullNotes: pullNotes,
     clearDevice: clearDevice,
     isDirty: isDirty
   };
