@@ -175,12 +175,32 @@ pypinyin 只会给最常用的 **jiàng** —— 直接生成就是教错的。�
 ## 开发
 
 ```bash
-npm test             # 149 个测试（界面冒烟 + 字词数据体检 + 教案体检 + 间隔复习 + 跨设备同步）
+npm test             # 152 个测试（界面冒烟 + 字词数据体检 + 教案体检 + 间隔复习 + 跨设备同步）
 npm run gen-data     # 重新生成带拼音的字词数据（需要 python + pypinyin）
 npm run gen-jiaoan   # 重新生成教案数据（需要 python，纯标准库）
 ```
 
 也可以直接双击 `index.html`（用的是普通 script，不是 ES module）。
+
+### 上线
+
+页面就在这个仓库的 GitHub Pages 上，推上去就等于发布。
+
+**但这台机器上 `git push` 是断的**：`https://github.com` 的 CONNECT 被代理挡回 502。
+`api.github.com` 是通的，所以走：
+
+```bash
+node scripts/_push_api.js --dry   # 先看会推哪些文件
+node scripts/_push_api.js         # 真推（Git Data API：blob → tree → commit → 改 ref）
+```
+
+它要求本地先 commit（推的是 HEAD 树，不是工作区），令牌复用 05 项目的 `.env.local`。
+API 造出来的 commit 本地没有，**不要 `git pull` / 硬 reset 去对齐**，下次照旧用 API 推。
+
+改完记得换版本号：`index.html` 里的 `app-ver` 和所有 `?v=` 要一起换（GitHub Pages 缓存很顽固）。
+
+云函数（后端）在 `10_家庭数据同步`，要单独部署：`powershell -File scripts/deploy.ps1`
+（先 `cloudbase login`，CLI 需要登录态）。
 
 ## 功能
 
