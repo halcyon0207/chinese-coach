@@ -527,6 +527,9 @@
       var live = {};
       all.forEach(function (it) { live[it.id] = 1; });
       s.workPushed = doneIds.filter(function (id) { return live[id]; });
+      // 孩子那端要显示"什么时候交的"。只在真发出去过的时候记 ——
+      // skipped（啥都没发）不能刷新这个时间，否则会把"早就交了"说成"刚刚"。
+      if (sent > 0) s.lastPushAt = Date.now();
       save();                  // 传完了：把"还有没传的"这份账销掉
       if (grades.length && hooks.applyGrades) hooks.applyGrades(grades);
       if (hooks.onStatus) hooks.onStatus();

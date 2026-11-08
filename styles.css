@@ -117,6 +117,21 @@ html, body {
 .action-row { display: flex; gap: 10px; margin-top: 14px; }
 .action-row .btn { flex: 1; }
 
+/* 批改页的「写对了 / 写错了」：钉在屏幕底部。
+   家长一次要批几十条，题目、笔迹、参考答案、教案提示都在上面 ——
+   按钮跟着内容走的话，每一条都得先滚一下才够得着，几十次就是几十次多余的滑动。
+   钉住之后，眼睛看内容、拇指停在同一个位置。 */
+.grade-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  margin: 14px -16px -16px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
 /* 单元选择 */
 .unit-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .unit-btn {

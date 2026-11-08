@@ -1627,19 +1627,65 @@
   // "提交给家长批改"就够不着了。家长的原话是 —— "做完一个项目最后他就自动返回了
   // 首页……如果不是自动提交的话，要在哪里准确点到提交这个按钮呢"
   // 明确回答：**不会自动传**，就是要在这儿点。
+  // 多久以前（只给"交上去多久了"用，粗粒度就够）
+  function agoText(ts) {
+    if (!ts) return '';
+    var m = Math.floor((Date.now() - ts) / 60000);
+    if (m < 1) return '刚刚';
+    if (m < 60) return m + ' 分钟前';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + ' 小时前';
+    return Math.floor(h / 24) + ' 天前';
+  }
+
+  // 待批改的那一批。
+  //
+  // 这里有**两种完全不同的状态**，原来被压成同一张卡（都写"待家长批改 N 条"
+  // + 一个大按钮），孩子根本分不清，于是交完还会反复点"提交"：
+  //   · 还没交给家长 —— 该点提交；
+  //   · 已经交给家长了，在等他批 —— 再点没有意义，只能等。
+  // 判据是 cloud.js 那本账（workPushed：哪些 id 确实传上去了）。
   function pendingCard() {
-    var n = (app.state.pending || []).length;
+    var list = app.state.pending || [];
+    var n = list.length;
     if (!n) return '';
-    var size = pendingSizeText();   // "待家长批改 102 条 · 约 1013 KB"
+
+    var s = (F && F.on()) ? F.sync() : null;
+    var pushed = {};
+    ((s && s.workPushed) || []).forEach(function (id) { pushed[id] = 1; });
+    var sentN = list.filter(function (p) { return pushed[p.id]; }).length;
+    var leftN = n - sentN;
+
+    // 全都交上去了：这张卡只剩"等"，不该再给一个会让孩子以为没交的大按钮。
+    if (sentN && !leftN) {
+      var when = s && s.lastPushAt ? agoText(s.lastPushAt) : '';
+      return '<div class="card card-quiet">' +
+        '<h2 class="card-title">已交给家长 ' + sentN + ' 条' +
+        (when ? ' · ' + esc(when) + ' 交的' : '') + '</h2>' +
+        '<p class="card-note">家长批完这里会自动变成「订正 N 条」，不用一直盯着。</p>' +
+        '<div class="action-row">' +
+        '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
+        '<button class="btn btn-soft" data-act="check-grades">看看批好了没</button>' +
+        '</div>' +
+        (app.submitMsg ? '<div class="feedback info">' + esc(app.submitMsg) + '</div>' : '') +
+        '</div>';
+    }
+
+    // 还有没交的（可能一部分交了）：标题仍是"待家长批改 N 条"（这些确实还在等），
+    // 但下面那句话要说清其中几条已经交出去了。
+    var kb = pendingKB();
     return '<div class="card card-due">' +
-      '<h2 class="card-title">' + esc(size || ('待家长批改 ' + n + ' 条')) + '</h2>' +
-      '<p class="card-note">写完只是攒在这台设备上，<b>点下面的按钮才会传给家长</b>——' +
-      '不会自动上传。家长在手机或电脑上打开批改页就能看到。</p>' +
+      '<h2 class="card-title">待家长批改 ' + n + ' 条' + (kb ? ' · 约 ' + kb + ' KB' : '') + '</h2>' +
+      (sentN
+        ? '<p class="card-note">其中 ' + sentN + ' 条已经交给家长了，剩 ' + leftN +
+          ' 条还在这台设备上。点下面的按钮把剩下的交上去。</p>'
+        : '<p class="card-note">写完只是攒在这台设备上，<b>点下面的按钮才会传给家长</b>——' +
+          '不会自动上传。家长在手机或电脑上打开批改页就能看到。</p>') +
       '<div class="action-row">' +
       '<button class="btn btn-ghost" data-act="my-grades">查看批改</button>' +
       '<button class="btn btn-primary" data-act="submit-work"' +
       (app.submitting ? ' disabled' : '') + '>' +
-      (app.submitting ? '正在提交…' : '提交给家长批改') +
+      (app.submitting ? '正在提交…' : (sentN ? '把剩下的交给家长' : '提交给家长批改')) +
       '</button>' +
       '</div>' +
       (app.submitMsg ? '<div class="feedback info">' + esc(app.submitMsg) + '</div>' : '') +
@@ -2425,7 +2471,7 @@
         // 数的是**合并后**的记录：手机这台本机一条都没有（作业和批改记录都在平板
         // 那台设备上），只数本机的话会显示"最近批过 0 条"，家长一看就懵。
         '<p class="card-note">孩子写完这里就会出现。最近批过 ' + mergedHistory().length + ' 条。' +
-        (F && F.on() ? '点下面的「看看有没有新交上来的作业」，孩子刚交的马上就出来。' : '') +
+        (F && F.on() ? '这一页开着等就行 —— 孩子刚交的会自动冒出来，不用反复点。' : '') +
         '</p>' +
         '</div>' +
         (app.message ? '<div class="feedback info">' + esc(app.message) + '</div>' : '') +
@@ -2471,7 +2517,9 @@
       '<input id="noteInput" class="note-input" type="text" maxlength="200" ' +
       'placeholder="批注（可选）：比如「崩少了山字头」" ' +
       'value="' + esc(app.note) + '">' +
-      '<div class="action-row">' +
+      // 这两个按钮常驻在屏幕底部（.grade-actions）：批几十条时每一条都要
+      // 先滚到底才够得着，是这套批改流程里最重复的一段体力活。
+      '<div class="action-row grade-actions">' +
       '<button class="btn btn-soft" data-act="grade-bad">写错了</button>' +
       '<button class="btn btn-primary" data-act="grade-ok">写对了</button>' +
       '</div>' +
@@ -3136,9 +3184,35 @@
     }, GRADE_POLL_MS);
   }
 
+  /* ---- 家长那端也要能"自己长出来" ----
+   *
+   * 上面那个轮询只装在孩子这边。可家长是**等作业来**的一方：他打开批改页、
+   * 孩子还没写完，就关掉了；过十分钟孩子交了，他一点都不知道，只能靠
+   * "想起来再打开一次"。等待方反而要主动查，方向是反的。
+   *
+   * 所以批改页停留时也看两眼（45 秒一次）—— 只在页面可见、且家长没在打字时。
+   * 孩子刚交的那几条，家长正开着页面就会自己冒出来，不用再点那个按钮。
+   */
+  var WORK_POLL_MS = 45 * 1000;
+  var workTimer = null;
+  function startWorkPoll() {
+    if (workTimer || typeof setInterval !== 'function') return;
+    workTimer = setInterval(function () {
+      if (app.view !== 'parent' || !app.parentUnlocked) return;
+      if (typeof document !== 'undefined' && document.visibilityState &&
+        document.visibilityState !== 'visible') return;
+      // 正在写批注 / 光标在输入框里：这一刻别动界面，等他写完自然刷
+      if (app.note) return;
+      if (typeof document !== 'undefined' && document.activeElement &&
+        document.activeElement.tagName === 'INPUT') return;
+      refreshCloudWork({ auto: true });
+    }, WORK_POLL_MS);
+  }
+
   // 打开页面 / 从后台切回 / 每 3 分钟 / 回首页时，取一次"家长在别处批的结果"。
+  // 返回一个 promise（只给「看看批好了没」那个按钮用，好在没结果时回一句话）。
   function refreshGrades() {
-    if (!F || !F.on()) return;
+    if (!F || !F.on()) return Promise.resolve({ ok: false, off: true });
     // 先把要送的回执取走，**不能等回调里再清**：这次请求回来的路上，
     // applyGrades 会把"刚拿到的那些结果"记成新的回执 —— 在成功回调里
     // 一刀清空，连这些新回执一起抹掉了。云端于是永远收不到 ack，
@@ -3146,11 +3220,13 @@
     // 又更容易超时 —— 和"批完没传上去"是同一个坑的两头。
     var acks = (app.acked || []).slice();
     app.acked = [];
-    F.pullGrades(acks).then(function () {
+    return F.pullGrades(acks).then(function () {
       // 送到了。这期间新拿到的结果已经记进 app.acked，留给下次送。
+      return { ok: true };
     }).catch(function () {
       // 没送到就补回去，下次再带 —— 丢了的话云端那几条永远删不掉
       app.acked = acks.concat(app.acked || []);
+      return { ok: false };
     });
   }
 
@@ -3484,12 +3560,21 @@
     return n;
   }
 
+  // 待传的这一批有多大（KB）。这个数决定"能不能一趟发出去"，
+  // 提交失败时最想知道、又最看不见的就是它。
+  function pendingKB() {
+    var n = (app.state.pending || []).length;
+    if (!n) return 0;
+    var bytes = 0;
+    try { bytes = utf8Len(JSON.stringify(app.state.pending)); } catch (e) { return 0; }
+    return Math.round(bytes / 1024);
+  }
+
   function pendingSizeText() {
     var n = (app.state.pending || []).length;
     if (!n) return '';
-    var bytes = 0;
-    try { bytes = utf8Len(JSON.stringify(app.state.pending)); } catch (e) { return ''; }
-    return '待家长批改 ' + n + ' 条 · 约 ' + Math.round(bytes / 1024) + ' KB';
+    var kb = pendingKB();
+    return '待家长批改 ' + n + ' 条' + (kb ? ' · 约 ' + kb + ' KB' : '');
   }
 
   function submitWork() {
@@ -3530,7 +3615,9 @@
           // 而他会以为这次全传上去了。所以照实说，并把下一步指出来。
           ? '这次没有要新传的作业：之前写好的那些应该已经在家长那头了。' +
             '要是他在手机上还是看不到，让他点一下批改页的「看看有没有新作业」。'
-          : ('已提交 ' + (n - full) + ' 条。家长在另一台设备上打开就能批改了。'
+          // 数用这趟实际要传的条数（r.count）：pending 里可能有一部分
+          // 上一趟就传上去了，按 n 说会把"交过了"的又算一遍。
+          : ('已提交 ' + Math.max(((r && r.count) || n) - full, 0) + ' 条。家长在另一台设备上打开就能批改了。'
             + (full
               ? '还有 ' + full + ' 条排队的太长，云端一次装不下 —— 让家长先批掉这批，' +
                 '再点一次「提交给家长批改」就能把剩下的带上去（那些还好好留在这台设备上）。'
@@ -3543,7 +3630,7 @@
         var sent = (r && r.sent) || 0;
         var err = (r && r.error) || '网络不通';
         app.submitMsg = sent
-          ? ('传上去 ' + sent + ' 条，还剩 ' + Math.max(n - sent, 0) + ' 条没传上去（' + err + '）。' +
+          ? ('传上去 ' + sent + ' 条，还剩 ' + Math.max(((r && r.total) || n) - sent, 0) + ' 条没传上去（' + err + '）。' +
              '再点一次「提交给家长批改」会把剩下的接着传完 —— 已经上去的不会重复。')
           : ('没提交上去（' + err + '）。写的字还在本机上，' + submitFailHint(err));
       }
@@ -3869,6 +3956,7 @@
   // 说明这条在别处已经生效，不能把掌握度再算一遍。
   function applyRemoteGrades(list) {
     var acked = [];
+    var applied = 0, wrong = 0;
     (list || []).forEach(function (g) {
       var p = null;
       for (var i = 0; i < app.state.pending.length; i++) {
@@ -3879,8 +3967,29 @@
       // 不回执的话它们会一直堆到 7 天过期，每次拉取都白传一遍。
       if (!p) { acked.push(g.id); return; }
       applyResult(p, g.ok, g.note);
+      applied++;
+      if (!g.ok) wrong++;
       acked.push(g.id);
     });
+
+    // 「批改到了」这件事得让人知道。
+    //
+    // 原来这里只是静默地把界面变一下：孩子多半正停在首页，或者根本没在看屏幕，
+    // 那张卡从"待批改"换成"订正 N 条"，他也不会注意到。家长那头更无从知道
+    // 孩子到底看到没有。所以新结果落地时给一句明说的提示 + 手机震一下。
+    // 家长自己那页不给（他正在批，不需要被告知"我批完了"）。
+    if (applied && app.view !== 'parent' && app.view !== 'report' && app.view !== 'sync') {
+      app.message = wrong
+        ? ('家长批好了 ' + applied + ' 条，有 ' + wrong + ' 条要订正。')
+        : ('家长批好了 ' + applied + ' 条，全对。');
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        try { navigator.vibrate(wrong ? [40, 80, 40] : 40); } catch (e) { /* 有些浏览器不给震 */ }
+      }
+    } else if (applied && app.view !== 'parent') {
+      // 报告页 / 同步页上收到：一句短的就行（那一页没有"订正"这个入口）
+      app.message = '刚收到 ' + applied + ' 条批改。';
+    }
+
     if (acked.length) { saveState(); render(); }
     return acked;
   }
@@ -3911,8 +4020,23 @@
     saveState();
     render();
 
-    // 这一批批完了 → 一起传上去（批得很快，没必要一条一传）
-    if (F && F.on() && !queueHead()) F.flushGrades();
+    // 攒够几条就送一次，不必等整队清空。
+    //
+    // 家长常常批到一半被叫走（做饭、接孩子、孩子来问"批好没"），
+    // 而原来只有"整队批完"才发 —— 那半批结果就压在本机，孩子那头一条都收不到，
+    // 只能干等。三条一送，孩子能边等边订正前几条，不用等全部批完。
+    // 服务端幂等（同一条只认第一次），多送几次没有副作用。
+    if (F && F.on()) {
+      if (!queueHead()) {
+        // 最后一条批完：给家长一句收尾。原来这时界面只是变回"没有待批改的"，
+        // 干完一摊活没有任何回音 —— 家长不确定结果到底走了没有。
+        app.message = '这一轮批完了，正在把结果传给孩子…';
+        render();
+        F.flushGrades();
+      } else if (F.pendingGrades() >= 3) {
+        F.flushGrades();
+      }
+    }
   }
 
   /* ============================== 渲染与事件 ============================== */
@@ -4114,6 +4238,28 @@
     if (act === 'mode') { app.state.mode = t.getAttribute('data-m') || 'py2word'; saveState(); return render(); }
     // 报告里切"看哪一段时间"（今天 / 7 天 / 30 天 / 全部）
     if (act === 'range') { app.range = t.getAttribute('data-r') || '7'; return render(); }
+    // 「看看批好了没」：孩子主动拉一次的入口。
+    // 攒着的那批显示"已交给家长"之后，孩子能做的就只有等 —— 给一个按钮，
+    // 让他不用切后台再切回来（那一招没人想得到）。
+    if (act === 'check-grades') {
+      if (!F || !F.on()) {
+        app.message = '这台设备没开跨设备同步 —— 批改结果传不过来。';
+        return render();
+      }
+      var beforePending = (app.state.pending || []).length;
+      refreshGrades().then(function (r) {
+        if (!r || !r.ok) {
+          app.message = '没连上，等一下再点一次。';
+          return render();
+        }
+        // 有结果时 applyRemoteGrades 已经写好提示并重绘了，这里只处理"没结果"
+        if ((app.state.pending || []).length === beforePending) {
+          app.message = '家长还没批到这儿 —— 批完这里会自动变。';
+          render();
+        }
+      });
+      return render();
+    }
     // 「看看有没有新作业」：马上拉一次，并告诉家长有没有新的
     if (act === 'reload-work') {
       // 没开同步时按钮本来就是禁用的，这里再兜一层：直接说清楚，
@@ -4429,6 +4575,12 @@
             // 这本来就是个没人需要做任何事的事件：长解释挂在页面上，
             // 谁下次打开都碍眼，现在首页更不会挂着它。
             app.message = '有 ' + data.dup + ' 条之前已经批过，已按先到的为准刷新。';
+          } else if (app.view === 'parent' && !app.note && !queueHead() && !F.pendingGrades()) {
+            // 这一轮真的送完了，给家长一个收尾。原来批完最后一条，界面只是
+            // 变回"没有待批改的"，干完一摊活没有任何回音 —— 家长不确定
+            // 结果到底走了没有，只能再点一次"提交"来求个安心。
+            app.message = '这一轮批完了，结果已经送到孩子那台设备。' +
+              '他打开就会看到，错的那些会直接进「订正」。';
           }
           if (app.note) return;   // 家长正在写批注，别抢焦点、别把输入框换掉
           refreshCloudWork();
@@ -4456,6 +4608,7 @@
       });
     }
     startGradePoll();
+    startWorkPoll();
 
     render();
     refreshGrades();
