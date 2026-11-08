@@ -47,6 +47,10 @@
       // 存本机而不是放内存：点进去做一半退出、来回切几次，顺序和进度都得还在 ——
       // 原来每次点进去都重新打乱，孩子刚记住的"做到哪儿了"就没了。
       dueRun: null,
+      // 本机批过的作业 id（{ id: 时间 }）。用来挡住"云端还没删干净时又把这条拉回来"——
+      // 批改推送失败、页面被系统杀掉、服务端没删成，都会让同一条作业重新出现在待批列表里，
+      // 家长只能再批一遍。见 app.js 的 rememberGraded / gradingQueue。
+      gradedIds: {},
       sync: null         // 跨设备同步（家庭码 / 设备标识），见 js/cloud.js；没开就是 null
     };
   }
@@ -106,6 +110,7 @@
         draft: obj(s.draft, null),
         mistakeDone: obj(s.mistakeDone, {}),
         dueRun: normalizeDueRun(s.dueRun),
+        gradedIds: obj(s.gradedIds, {}),
         sync: obj(s.sync, { on: false, fam: '', dev: '', name: '', lastAt: 0 })
       };
     } catch (e) {

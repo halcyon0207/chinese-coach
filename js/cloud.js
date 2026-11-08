@@ -552,38 +552,96 @@
     s.outbox.push(g);
   }
 
+  // 从待发队列里摘掉指定 id —— 只在**确认送达之后**才调用。
+  //
+  // 这一步看着小事，上一版却是个会丢批改的坑：
+  // 原来是"先把 outbox 清空并落盘，再发请求"，理由是"免得 25 秒里页面被关掉、
+  // 下次重发同一批"。可它换来的代价是反过来的 ——
+  // 请求还在路上时页面被关掉（手机上批完就锁屏、切微信，太常见了），
+  // 标签页被杀，`.catch` 根本没机会跑，而 outbox 早就是空的。
+  // 于是这批批改**彻底消失**：云端作业一条没删，家长重新打开，
+  // 待批列表原样全回来，等于白批一遍。
+  // 服务端本来就幂等（同一条只认第一次），重发是安全的 ——
+  // 那就该"先送到、再销账"，顺序反了才是险的那一头。
+  function dropGraded(list) {
+    var s = sync();
+    var drop = {};
+    (list || []).forEach(function (g) { if (g && g.id) drop[g.id] = 1; });
+    s.outbox = (s.outbox || []).filter(function (g) { return !drop[g.id]; });
+  }
+
+  var gradeBusy = false;
+  var gradeRetryNo = 0;
+  var gradeRetryTimer = null;
+  var GRADE_RETRY_MS = [30000, 60000, 120000];
+
+  // 批改送不上去时自动再试几次。
+  //
+  // 原来失败了只能等"下次打开页面 / 切到后台"才补发 —— 而家长批完这一批通常
+  // 就不再打开这个页面了。于是那批批改一直压在本机，孩子那头一条都收不到，
+  // 两边都以为对方出了问题。
+  // 只在页面可见时试（看不见的时候不该耗电），最多三次，间隔翻倍。
+  function scheduleGradeRetry() {
+    if (gradeRetryTimer) return;
+    if (gradeRetryNo >= GRADE_RETRY_MS.length) return;
+    if (typeof setTimeout !== 'function') return;
+    var wait = GRADE_RETRY_MS[gradeRetryNo];
+    gradeRetryNo++;
+    gradeRetryTimer = setTimeout(function () {
+      gradeRetryTimer = null;
+      if (!on()) return;
+      // 页面在后台就先不发：等切回前台那次 visibilitychange 会补
+      if (typeof document !== 'undefined' && document.visibilityState &&
+        document.visibilityState !== 'visible') return;
+      if (!pendingGrades()) return;
+      flushGrades();
+    }, wait);
+    // Node 里跑测试时别让这个定时器把进程拖住；浏览器里没有 unref，无副作用
+    if (gradeRetryTimer && typeof gradeRetryTimer.unref === 'function') gradeRetryTimer.unref();
+  }
+
   function flushGrades() {
     if (!on()) return Promise.resolve({ ok: false, error: '没开同步' });
     var s = sync();
     if (!Array.isArray(s.outbox) || !s.outbox.length) return Promise.resolve({ ok: true, skipped: true });
+    // 上一趟还在路上：这一趟什么都不做，否则同一批会被发两次
+    if (gradeBusy) return Promise.resolve({ ok: true, busy: true });
 
     var list = s.outbox.slice();
-    s.outbox = [];
-    // 立刻落盘：这一刻起"待发的批改"已经是空的了。
-    // 不存的话，post() 那 25 秒里要是页面被关掉，下次打开 outbox 里还有这同一批 ——
-    // 会再发一次（服务端幂等，不会批错，但白白多一趟请求）。
-    save();
+    gradeBusy = true;
     // dev 是"谁在批"（这台设备），grades 里的 dev 是"作业来自哪台设备"——两个不是一回事。
     // 少了外层这个 dev，服务端会以"设备标识不合法"直接拒掉。
     return post({ action: 'grade.push', fam: s.fam, dev: s.dev, grades: list })
       .then(function (data) {
+        gradeBusy = false;
+        gradeRetryNo = 0;
+        if (gradeRetryTimer) { clearTimeout(gradeRetryTimer); gradeRetryTimer = null; }
+        // 送到之后才销账，而且只摘这一批：这期间新批的还留在 outbox 里
+        dropGraded(list);
         lastError = '';
-        save();   // 传完再存一次：万一上面那次没写成，这里兜住
+        save();
         // 回调单独包一层：它要是炸了，不该让"已经交上去的批改"被回滚重发。
         // 网络失败和回调出错是两回事，别混在一起。
         try {
-          if (hooks.onGraded) hooks.onGraded(data || {});
+          if (hooks.onGraded) hooks.onGraded(data || {}, list);
         } catch (cbErr) {
           if (typeof console !== 'undefined' && console.warn) console.warn('[cloud] onGraded 出错：', cbErr);
         }
         if (hooks.onStatus) hooks.onStatus();
+        // 这一趟在路上时又攒了新的（家长批得快）：接着送，别等到下次切后台。
+        // 走一个 0 毫秒的定时器而不是直接递归，免得把调用栈叠起来。
+        if (pendingGrades() && typeof setTimeout === 'function') {
+          var again = setTimeout(function () { flushGrades(); }, 0);
+          if (again && typeof again.unref === 'function') again.unref();
+        }
         return { ok: true, count: list.length };
       })
       .catch(function (e) {
-        s.outbox = list.concat(s.outbox || []);   // 没传上去，下次再补
-        save();                                   // 同上：这笔账要在本机
+        gradeBusy = false;
+        // outbox 原样留着（这一批还在里面），下次接着发 —— 服务端幂等，不会批错
         note(e);
-        return { ok: false, error: lastError };
+        scheduleGradeRetry();
+        return { ok: false, error: lastError, count: list.length };
       });
   }
 
@@ -632,23 +690,6 @@
     return post({ action: 'report.pull', fam: s.fam }).then(function (d) { return d.reports || []; });
   }
 
-  /* ------------------------------ 留言流（家长端写，孩子端读） ------------------------------ */
-
-  // 家长给孩子捎一句话。孩子在首页能看到，点「知道了」后就不再显示（已读记在孩子本机）。
-  // 不做已读回执（少一次写）：云端留言 7 天自动过期、最多留 5 条，重装最多把最近几条再看一遍。
-  function pushNote(text) {
-    if (!on()) return Promise.reject(new Error('没开同步'));
-    var s = sync();
-    return post({ action: 'note.push', fam: s.fam, dev: s.dev, text: String(text || '').slice(0, 200) });
-  }
-
-  // 孩子端拉留言。新的在前。进首页时看一眼就够，不做轮询。
-  function pullNotes() {
-    if (!on()) return Promise.resolve([]);
-    var s = sync();
-    return post({ action: 'note.pull', fam: s.fam }).then(function (d) { return d.notes || []; });
-  }
-
   /* ------------------------------ 清空 ------------------------------ */
 
   function clearDevice() {
@@ -689,12 +730,18 @@
   function statusText() {
     var s = sync();
     if (!s || !s.on) return '未开启跨设备同步';
-    // 没有定时器、也不轮询（这是刻意的选择），所以失败之后要给人一条能自己动手的路：
-    // 回到前台、或者再点一次提交就会重试。这句得说出来，否则家长只能干等。
+    // 失败之后要给人一条能自己动手的路。作业那条是手动的（再点一次提交），
+    // 批改那条会自己退避重试 —— 两句话不能写成一样，否则家长会白点。
     if (isDirty() && lastError) {
       return '有作业没传上去（' + lastError + '），再点一次「提交给家长批改」就会重试';
     }
     if (isDirty()) return '有作业还没传上去';
+    var g = pendingGrades();
+    if (g) {
+      return lastError
+        ? ('有 ' + g + ' 条批改没送出去（' + lastError + '），正在自动重试，也可以点「提交批改」')
+        : ('有 ' + g + ' 条批改还没送出去，正在自动重试');
+    }
     if (lastError) return '同步暂不可用（' + lastError + '），数据还在本机';
     if (!s.lastAt) return '已开启，还没同步过';
     var min = Math.floor((nowTs() - s.lastAt) / 60000);
@@ -729,8 +776,6 @@
     pullWork: pullWork,
     pushReport: pushReport,
     pullReports: pullReports,
-    pushNote: pushNote,
-    pullNotes: pullNotes,
     clearDevice: clearDevice,
     isDirty: isDirty
   };

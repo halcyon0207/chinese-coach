@@ -97,7 +97,22 @@ html, body {
 .btn-ghost { background: transparent; }
 .btn-lg { font-size: 17px; padding: 14px 20px; width: 100%; }
 .btn-block { width: 100%; margin-top: 8px; }
-.btn-icon { border: none; background: transparent; font-size: 18px; color: var(--muted); cursor: pointer; }
+/* 返回键只有一个箭头，按字号撑出来的点击区只有二十来像素 —— 手指点上去经常落空，
+   尤其孩子拿着平板边走边用的时候。给足 44px（iOS/Android 都认这个最小触摸尺寸）。 */
+.btn-icon {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  color: var(--muted);
+  cursor: pointer;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: -10px;   /* 补回撑开的那点宽度，标题还对着左边 */
+  border-radius: 10px;
+}
 
 .action-row { display: flex; gap: 10px; margin-top: 14px; }
 .action-row .btn { flex: 1; }
@@ -494,7 +509,7 @@ html, body {
   color: var(--muted);
   cursor: pointer;
 }
-.mode-btn.on { border-color: var(--primary); color: var(--primary); background: #fff; font-weight: 600; }
+.mode-btn.on { border-color: var(--primary); color: var(--primary); background: var(--card); font-weight: 600; }
 
 /* ==================== 家长区：一行两个主按钮 ==================== */
 /* 家长进来最常做的是"批改"和"看报告"，这两个并排放在最上面；

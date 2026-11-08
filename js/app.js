@@ -102,14 +102,6 @@
     return (d.getMonth() + 1) + '月' + d.getDate() + '日';
   }
 
-  // 按钮角标用的短日期。课时按钮上挂"9月24日"会把按钮撑得很长，
-  // 缩成 9/24，一行还能排下两三个。
-  function fmtDayShort(ts) {
-    if (!ts) return '';
-    var d = new Date(ts);
-    return (d.getMonth() + 1) + '/' + d.getDate();
-  }
-
   // 这一条练习内容最后一次是什么时候练的（拍过、批过都算）。
   function lastAtOf(item) {
     var r = (app.state.stats || {})[keyOf(item)];
@@ -297,11 +289,34 @@
 
   // 空间告急时的抢救：历史笔迹砍到只剩最近几条，批改结果里的笔迹也砍掉。
   // 先丢笔迹 —— 它最占地方，又最不关键。
+  //
+  // 分两级，因为"腾一点"有时候根本不够：历史还很短（刚开练那一阵）、
+  // 而 draft / pending 里一支带几十笔的新笔迹就能把配额吃掉。
+  // 只做第一级的话，那一轮里每写一条都存不住 —— 而界面上只在旁边挂一句警告，
+  // 孩子根本不会为这个停下来。第二级连历史里的旧记录一起收，能救回来就别放弃。
   function shedInk() {
     var changed = trimRecentInk(8);
     var fb = app.state.feedback || [];
     for (var i = 0; i < fb.length; i++) {
       if (fb[i] && fb[i].strokes) { delete fb[i].strokes; changed = true; }
+    }
+    if (changed) return true;
+
+    // 第一级没腾出任何东西：历史本来就少于 8 条、批改反馈里也没笔迹。
+    // 那就从更老的记录下手 —— 文字、批注、统计照旧全留，只丢回放。
+    var h = app.state.history || [];
+    for (var j = 0; j < h.length; j++) {
+      if (h[j] && h[j].strokes) { delete h[j].strokes; changed = true; }
+    }
+    // 还没交的作业（pending）不能丢：笔迹是家长批改时唯一能看的东西。
+    // 但**已经传上去的那几条**云端有副本，本机这份可以放手（见 workPushed）。
+    var s = app.state.sync;
+    if (!changed && s && s.on && Array.isArray(s.workPushed) && s.workPushed.length) {
+      var sent = {};
+      s.workPushed.forEach(function (id) { sent[id] = 1; });
+      (app.state.pending || []).forEach(function (p) {
+        if (p && sent[p.id] && p.strokes && p.strokes.length) { p.strokes = []; changed = true; }
+      });
     }
     return changed;
   }
@@ -546,8 +561,6 @@
     });
     return out;
   }
-
-  function itemsForUnit(unitId) { return itemsForLesson(unitId, 'all'); }
 
   /* ---------- 多音字选择题 ---------- */
   // 素材是现成的：data.js 里每单元都有 polyphone（字 + 每个读音 + 课文里的例子）。
@@ -2455,7 +2468,8 @@
       '<div class="write-wrap"><canvas id="reviewCanvas"></canvas></div>' +
       '<div class="answer-line">' + (isZ ? '参考答案（家长据此判断）：' : '正确答案：') + '<b>' + ansTxt + '</b></div>' +
       tipHtml +
-      '<input id="noteInput" class="note-input" type="text" placeholder="批注（可选）：比如「崩少了山字头」" ' +
+      '<input id="noteInput" class="note-input" type="text" maxlength="200" ' +
+      'placeholder="批注（可选）：比如「崩少了山字头」" ' +
       'value="' + esc(app.note) + '">' +
       '<div class="action-row">' +
       '<button class="btn btn-soft" data-act="grade-bad">写错了</button>' +
@@ -2697,8 +2711,11 @@
     // 猜是网不好还是自己点错了。
     var why = '';
     if (on && n && F.statusText) {
-      var t = F.statusText();
-      if (t && t.indexOf('暂不可用') >= 0) why = t;
+      var t = F.statusText() || '';
+      // 原来只认"暂不可用"这一个词，可真正会出现的失败文案是
+      // "有作业没传上去（…）" —— 永远匹配不上，等于失败原因从来没露过面。
+      // 这里按"是不是在说没传出去"来判断，别再对着某一句话硬比。
+      if (/没传上去|没送出去|暂不可用|超时|连不上/.test(t)) why = t;
     }
     return '<div class="card card-quiet">' +
       '<h2 class="card-title">提交批改</h2>' +
@@ -3545,10 +3562,13 @@
     app.message = '正在提交…';
     render();
     F.flushGrades().then(function (r) {
+      // busy：上一趟还在路上，这一趟什么都没发。不能顺口说"已提交" —— 那是撒谎。
       app.message = (r && r.ok)
-        ? (n ? ('已提交 ' + n + ' 条批改。孩子那台设备联网后就能看到。')
-             : '没有攒下的批改要提交 —— 刚批的已经传上去了。')
-        : ('没提交上去（' + ((r && r.error) || '网络不通') + '）。结果留在本机，下次联网会自动补。');
+        ? (r.busy
+          ? '正在提交，稍等一下 —— 上一批还在路上。'
+          : (n ? ('已提交 ' + n + ' 条批改。孩子那台设备联网后就能看到。')
+               : '没有攒下的批改要提交 —— 刚批的已经传上去了。'))
+        : ('没提交上去（' + ((r && r.error) || '网络不通') + '）。结果留在本机，会自动再试几次。');
       render();
     });
   }
@@ -3781,9 +3801,13 @@
     var s = F && F.sync();
     var sent = {};
     ((s && s.outbox) || []).forEach(function (g) { sent[g.id] = 1; });
+    // 本机批过的（不管当时送没送到）同样挡掉 —— 这是"批过的又回来了"的最后一道门。
+    // outbox 只能证明"还没送出去"，一旦送出去它就被摘掉了；
+    // 而云端有没有真的删掉那条作业，这台设备无从知道。所以另记一本账。
+    var done = (app.state && app.state.gradedIds) || {};
 
     return mine.concat(cloud)
-      .filter(function (x) { return !sent[x.id]; })
+      .filter(function (x) { return !sent[x.id] && !done[x.id]; })
       .sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
   }
 
@@ -3792,12 +3816,36 @@
     return q.length ? q[0] : null;
   }
 
+  // 批过的 id 记一笔账（只记 id + 时间，几十字节）。
+  //
+  // 为什么需要：批改到底有没有在云端生效，前端说了不算 —— 发送失败、页面被杀、
+  // 或者服务端没删成，任何一种都会让同一条作业在下次拉取时又回到待批列表。
+  // 家长看到的就是"我明明批过，怎么又要批一遍"。有了这本账，
+  // 只要这台设备批过，云端再吐回来也不会重新进队列（详见 gradingQueue）。
+  var GRADED_KEEP_MS = 30 * 24 * 3600 * 1000;
+  var GRADED_MAX = 400;
+  function rememberGraded(id) {
+    if (!id) return;
+    if (!app.state.gradedIds || typeof app.state.gradedIds !== 'object') app.state.gradedIds = {};
+    var m = app.state.gradedIds;
+    m[id] = Date.now();
+    var keys = Object.keys(m);
+    if (keys.length <= GRADED_MAX) return;
+    // 超量了就按时间清老账。30 天的保留期比云端作业的 TTL 一样长 ——
+    // 云端那边的作业最多挂 30 天，本机记满 30 天足以覆盖它整个生命周期。
+    keys.sort(function (a, b) { return (m[a] || 0) - (m[b] || 0); });
+    for (var i = 0; i < keys.length - GRADED_MAX; i++) delete m[keys[i]];
+    var floor = Date.now() - GRADED_KEEP_MS;
+    Object.keys(m).forEach(function (k) { if ((m[k] || 0) < floor) delete m[k]; });
+  }
+
   // 一条作答落地：更新掌握度、排复习、记历史、把结果摆给孩子看。
   // 本地批和"家长在别的设备上批完传回来"走的是同一条路 —— 规则分叉就会出现
   // "错一次"在两种题型/两种来源里含义不同，复习排期立刻乱掉。
   function applyResult(p, isCorrect, note) {
     // p.ts 是孩子交上来的时刻（家长可能几天后才批）—— 见 recordResult 的说明
     recordResult(p.item, isCorrect, note, p.strokes, p.ts);
+    rememberGraded(p.id);
 
     // 批改完立刻把结果摆给孩子看。隔几天再看，他早忘了自己当时怎么写的，
     // 家长那句批注也就失去了上下文。带上笔迹，孩子能对照着看自己哪里写错了。
@@ -3854,6 +3902,9 @@
     } else {
       // 别的设备上写的字：复习排期在那台设备上算，这台只把队列划掉
       app.cloudWork = (app.cloudWork || []).filter(function (x) { return x.id !== p.id; });
+      // 但"这条我批过了"必须记在本机：批改结果要等 push 成功、服务端再删掉云端那份，
+      // 而这两步都可能不成。不记账的话，家长下次打开页面重新拉取，刚才批过的原样回来。
+      rememberGraded(p.id);
     }
 
     app.note = '';
@@ -4346,14 +4397,30 @@
           var acked = applyRemoteGrades(list);
           if (acked.length) app.acked = (app.acked || []).concat(acked);
         },
-        onStatus: function () { if (app.view === 'report') render(); },
+        onStatus: function () {
+          if (app.view === 'report') return render();
+          // 批改页也要重绘：批完自动上传，成没成只在这里能看出来。
+          // 原来只有报告页会重绘，于是"没送出去"这件事在批改页上是无声的 ——
+          // 家长以为批完了，其实那批还压在本机，孩子那头一条都没收到。
+          // 正在写批注时不重绘（会抢焦点、把输入框换掉），等他写完那一下会自然刷新。
+          if (app.view === 'parent' && !app.note) return render();
+        },
         // cloud.js 里"还有东西没传上去 / 传完了"这两种状态都要立刻落盘：
         // 提交到一半被关掉（或页面被刷新）时，靠的就是本机这个标记，
         // 下次打开才知道要把剩下的补上去。
         onSave: function () { saveState(); },
         // 两个家长同时批的时候会撞车：服务端保证"先到为准"，
         // 这里把撞上的条数说一句，顺便把队列刷新成最新的。
-        onGraded: function (data) {
+        onGraded: function (data, list) {
+          // 这一批**已经送到云端**了（服务端同时把对应的作业删掉了）。
+          // 所以立刻把本地那份云队列里对应的条目划掉，再重新拉一次准数 ——
+          // 少了这一步，家长会看到"刚批完的又从待批里冒出来"，
+          // 其实只是他还拿着一份批改之前的旧列表。
+          if (list && list.length) {
+            var ids = {};
+            list.forEach(function (g) { if (g && g.id) ids[g.id] = 1; });
+            app.cloudWork = (app.cloudWork || []).filter(function (x) { return !ids[x.id]; });
+          }
           if (data && data.dup > 0) {
             // 说"被另一台设备批过"是错的：绝大多数情况是**它自己上一次**已经传上去了，
             // 只是那次的回信没等到（超时）。同一条只认第一次，所以这里只说明结果，
@@ -4362,8 +4429,10 @@
             // 这本来就是个没人需要做任何事的事件：长解释挂在页面上，
             // 谁下次打开都碍眼，现在首页更不会挂着它。
             app.message = '有 ' + data.dup + ' 条之前已经批过，已按先到的为准刷新。';
-            refreshCloudWork();
           }
+          if (app.note) return;   // 家长正在写批注，别抢焦点、别把输入框换掉
+          refreshCloudWork();
+          if (app.view === 'parent') render();
         }
         // 家庭码在语文 / 数学之间共用，第三参数把两边的数据隔开
       }, 'chinese');
